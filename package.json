@@ -1,12 +1,25 @@
 {
   "name": "opencode-lobster-auth",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenCode provider plugin: NetEase Youdao LobsterAI (有道龙虾)",
   "type": "module",
   "main": "./index.mjs",
   "exports": "./index.mjs",
-  "files": ["index.mjs", "lib", "README.md", "README.zh-CN.md", "LICENSE"],
-  "keywords": ["opencode", "opencode-plugin", "magpie", "lobster", "lobsterai", "youdao"],
+  "files": [
+    "index.mjs",
+    "lib",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "magpie",
+    "lobster",
+    "lobsterai",
+    "youdao"
+  ],
   "license": "MIT",
   "author": "Jasery <jaserydev@163.com>",
   "repository": {
@@ -15,7 +28,9 @@
   },
   "homepage": "https://github.com/Jasery/opencode-lobster-auth#readme",
   "bugs": "https://github.com/Jasery/opencode-lobster-auth/issues",
-  "scripts": { "test": "bun test" },
+  "scripts": {
+    "test": "bun test"
+  },
   "magpie": {
     "maxConcurrency": 8,
     "icon": "https://lobsterai.youdao.com/portal/lobsterai-logo.png"

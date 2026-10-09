@@ -98,8 +98,12 @@ completions。LobsterAI 有三个习惯被处理掉了：
 
 LobsterAI 的 `kimi-k3` 采样参数由服务端固定，因此 `temperature`、`top_p`、
 `n` 和两个 penalty 会被删掉，`reasoning_effort` 固定为 `max`，缺少
-`reasoning_content` 的 assistant 工具调用会被补一个空串。当前目录里没有 K3
-模型；这段处理是为将来出现 K3 准备的。
+`reasoning_content` 的 assistant 工具调用会被补一个空串。
+
+`kimi-k3` 属于 LobsterAI「能用但没列出」的模型：`/api/models/available`
+返回 29 个模型，其中没有 K3，但对 `kimi-k3` 发请求能正常作答。它保留在
+本插件为未登录账号声明的兜底表里，所以 `lobster/kimi-k3` 是可选的 ——
+上面那段处理也因此是**实际生效的**，不是预防性代码。
 
 ## 模型
 

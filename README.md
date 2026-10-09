@@ -117,8 +117,13 @@ Measured on `deepseek-flash`: `none` leaves `reasoning_content` at exactly
 LobsterAI's `kimi-k3` takes its sampling parameters from the server, so
 `temperature`, `top_p`, `n` and the penalties are dropped, `reasoning_effort`
 is fixed to `max`, and an assistant tool call missing `reasoning_content` is
-given an empty one. No model in the current catalogue is K3; the handling is
-there for when one is.
+given an empty one.
+
+`kimi-k3` is one of the models LobsterAI serves but does not list:
+`/api/models/available` returns 29 models and none of them is K3, yet a chat
+against `kimi-k3` answers normally. It is kept in the list this package
+declares for a signed-out account, so `lobster/kimi-k3` is offered — and the
+handling above is live, not a precaution.
 
 ## Models
 
