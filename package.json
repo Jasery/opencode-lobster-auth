@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./index.mjs",
   "exports": "./index.mjs",
-  "files": ["index.mjs", "lib", "README.md"],
+  "files": ["index.mjs", "lib", "README.md", "README.zh-CN.md"],
   "keywords": ["opencode", "opencode-plugin", "magpie", "lobster", "lobsterai", "youdao"],
   "license": "MIT",
   "scripts": { "test": "bun test" },

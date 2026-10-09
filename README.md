@@ -1,66 +1,170 @@
 # opencode-lobster-auth
 
-为 [magpie](https://usemagpie.ai) 提供 provider `lobster`：使用有道
-LobsterAI（有道龙虾）账号里的模型。
+Signs in to a [LobsterAI](https://lobsterai.youdao.com) (有道龙虾, NetEase
+Youdao's desktop agent) account and serves its models as the provider
+`lobster` in [magpie](https://usemagpie.ai). About 30 models: DeepSeek, GLM,
+Kimi, Qwen, MiniMax and Doubao.
 
-## 登录
+**English** · [中文](README.zh-CN.md)
 
-两种方式，任选其一：
+## Install
 
-1. **浏览器登录** —— 插件在本机 `127.0.0.1` 起一个回调服务，打开有道登录页。
-   登录成功后浏览器跳回本地，插件用授权码换取 token。存成 OAuth 账号，
-   magpie 会在过期前自动续期。
-2. **从本机 LobsterAI 导入** —— 只读读取 LobsterAI 桌面端的登录信息
-   （Windows `%APPDATA%\LobsterAI\lobsterai.sqlite`）。**不弹浏览器、不需要
-   输入任何东西**，直接使用桌面端当前登录的账号。
-   这种方式需要先在本机安装并登录 LobsterAI 桌面端。
+A folder plugin — it is not published to npm:
 
-两种方式用同一个账号标识（有道账号的 `yid`），因此用第二种登录后，
-再用第一种登录同一账号会原地替换它。
+```sh
+magpie plugin add /path/to/magpie-lobster
+magpie plugin login lobster
+```
 
-### 为什么导入这条路不保存 token
+## Signing in
 
-导入方式**一个字节的凭据都不存**（`access`、`refresh` 都是空串，`expires` 为 0），
-只在每次请求时现读桌面端的库：
+Two ways, either one is enough. Both name the account by the Youdao account
+id (`yid`), so signing in the second way to an account already signed in the
+first way replaces it in place.
 
-- 抄一份 `refreshToken` 会让桌面端和插件共用同一个 token，**谁先续期谁就把
-  对方踢下线**。留空则双方互不干扰。
-- `expires` 为 0，magpie 因此永不续期（它只在 `expires` 非零时才调用
-  `auth.refresh`），桌面端的会话不会被搅动。
-- 现读的好处是桌面端续期后，插件下一次请求自动用上新 token，不必重新登录。
+- **Browser (a Youdao account).** The plugin serves a callback on
+  `127.0.0.1` and magpie opens Youdao's sign-in page. The browser comes back
+  with a code, which is traded for tokens at `/api/auth/exchange`. Kept as
+  an `oauth` sign-in holding the access and refresh tokens and their expiry,
+  so magpie renews it.
+- **The desktop's sign-in.** Uses the account LobsterAI's own desktop app is
+  signed in to. **No page is opened and nothing is typed.** The app's SQLite
+  database is read, never written:
+  - Windows: `%APPDATA%\LobsterAI\lobsterai.sqlite`
+  - macOS: `~/Library/Application Support/LobsterAI/lobsterai.sqlite`
+  - Linux: `~/.config/LobsterAI/lobsterai.sqlite`
 
-代价是：如果桌面端退出登录、卸载或库文件不可读，这个账号会立刻失效并提示
-重新登录 —— 这比用一个已经悄悄失效的旧 token 更诚实。
+  A database that isn't there, or one the app keeps encrypted, fails this
+  way with a message saying so; use the browser way instead.
 
-## 模型
+Both are kept in magpie's `plugin-auth.json`.
 
-登录后从 `/api/models/available` 拉取账号可用的模型（约 30 个，
-含 DeepSeek、GLM、Kimi、Qwen、MiniMax、豆包等），并带上各自的思考档位。
-未登录时显示一份静态兜底列表。
+### Why the import keeps no token
 
-## 说明
+The desktop way stores **no credential at all** — `access` and `refresh` are
+empty and `expires` is 0 — and reads the token from the app's database on
+every request:
 
-- 思考档位由上游的 `thinkingConfig` 决定每个模型支持哪些，实测都是
-  `关 / high / max` 三档。对 magpie 暴露时必须用**它那条档位阶梯里的名字**：
-  magpie 会把入参 `reasoning_effort` 映射到「模型声明过的档位名」再下发，
-  声明里用了阶梯外的名字，那一档就永远选不中。LobsterAI 管最低档叫 `off`，
-  而 `off` 不在 magpie 的阶梯里，所以对外叫 `none` —— 插件收到 `none` 后
-  再换回上游的 `off`。
-- 档位通过 LobsterAI 的私有字段 `lobsterai_options` 传给上游。
-  只有自带档位表的模型才会带上这个字段 —— 对其它模型带上它会被上游直接
-  拒答（`model does not have a valid thinkingConfig`）。
-- 上游始终以 SSE 作答（即使请求写了 `stream:false`），插件会为非流式
-  请求重组；上游把错误放在 SSE 里且状态码仍为 200，插件会还原成真正的
-  非 2xx，以便 magpie 故障切换。
-- 本插件不会主动调用 LobsterAI 的续期接口去验证或刷新「导入」来的 token；
-  续期只发生在浏览器登录的账号上，由 magpie 在过期前触发。
+- A copied `refreshToken` would be shared with the app: whichever side
+  refreshes first signs the other out. Empty means neither disturbs the
+  other.
+- `expires` of 0 means magpie never renews it — magpie renews only an
+  `oauth` sign-in whose expiry is set — so the app's session is never
+  touched.
+- Reading it fresh means the plugin follows a token the app renewed, with no
+  need to sign in again.
 
-## 开发
+The cost: if the app is signed out, uninstalled, or its database becomes
+unreadable, the account stops working at once and magpie is told to ask for
+a new sign-in. That is more honest than a token that quietly went stale.
 
-```bash
+### Renewal
+
+A browser sign-in is renewed by magpie through the plugin's `auth.refresh`,
+six hours before it ends. The desktop's sign-in is structurally never
+renewed, as above.
+
+The plugin never calls LobsterAI's own refresh endpoint to check or renew
+anything: `/api/auth/refresh` may spend the account's real refresh token, so
+it is deliberately left alone.
+
+## Requests
+
+Chats are chat completions at
+`https://lobsterai-server.youdao.com/api/proxy/v1`. Three of LobsterAI's
+habits are handled:
+
+- **Every reply is SSE**, even one asked for with `stream: false`. A
+  non-streaming caller gets one `chat.completion` reassembled from it; a
+  streaming caller gets the events as they are.
+- **Failures ride inside a 200.** LobsterAI puts an error in the stream
+  (`event: error`) and still answers 200, which would leave a caller with
+  nothing to fail over on. The plugin reads the first record and answers the
+  status it means: `40100` → 401, `40300` → 403, `42900` or rate-limit
+  wording → 429, anything else → 400. A sign-in LobsterAI turns down is a
+  genuine 401, passed through with magpie's lapse mark so the account is
+  flagged.
+- **Requests carry the desktop client's headers**
+  (`X-LobsterAI-Client-Version`, `X-LobsterAI-Client-Capabilities`).
+  LobsterAI doesn't insist on them, but they name the feature set the plugin
+  speaks.
+
+### Thinking levels
+
+A model's `thinkingConfig` gives it levels — `off`, `high`, `max` in the
+current catalogue — and they reach the wire in LobsterAI's own field:
+`{"lobsterai_options":{"version":1,"thinking":{"level":"off"}}}`.
+
+Two things are worth knowing:
+
+- **`lobsterai_options` is only for models that have a thinking profile.**
+  21 of the 29 models have none, and sending the field to one of those is a
+  hard error (`code 4000`, *model does not have a valid thinkingConfig*), so
+  the whole chat fails. A level is passed on only where there is a profile
+  to map it through.
+- **The lowest level is offered as `none`, not `off`.** magpie doesn't use
+  what a variant holds; it maps `reasoning_effort` onto a level name the
+  model declared, from a ladder of its own
+  (`none/minimal/low/medium/high/xhigh/max`). `off` is not on that ladder,
+  so a level declared as `off` can never be chosen. The plugin declares
+  `none` and turns it back into `off` for LobsterAI.
+
+Measured on `deepseek-flash`: `none` leaves `reasoning_content` at exactly
+0 bytes, while `high`, `max` and no level at all don't.
+
+### Kimi K3
+
+LobsterAI's `kimi-k3` takes its sampling parameters from the server, so
+`temperature`, `top_p`, `n` and the penalties are dropped, `reasoning_effort`
+is fixed to `max`, and an assistant tool call missing `reasoning_content` is
+given an empty one. No model in the current catalogue is K3; the handling is
+there for when one is.
+
+## Models
+
+Signed in, the list is the account's own (`/api/models/available`): 29
+models, each with its context window, whether it takes images, and its
+thinking levels. Until then a static list of five is used, so the provider
+is visible before signing in.
+
+`costMultiplier` becomes magpie's `rate`. It is **time-of-day pricing**:
+`deepseek-flash` is 0.05 in LobsterAI's off-peak hours and 0.1 in the peak
+ones (09:00–12:00 and 14:00–18:00, Beijing time). The rate is read when the
+list is, so it can be a while out of date.
+
+## Usage
+
+`magpie quota` shows the free allowance, when it ends and the credits left,
+from `/api/user/quota` and `/api/user/profile-summary`. The plugin reports
+`kept`: it renews nothing itself, so it must not claim a renewal it didn't
+do.
+
+## Not here
+
+- **Company accounts.** LobsterAI sends them through a different page
+  (`EnterpriseIdentitySelect`). Only personal accounts are handled.
+- **A verified `/api/auth/refresh`.** Calling it may spend the account's
+  real refresh token, so it is not exercised. The renewal path is written
+  from the app's own code and has not been confirmed against the service.
+- **An exact output limit.** The catalogue has no such field. The plugin
+  declares a conservative 32,000; measured, LobsterAI takes 262,144 and
+  answers 500 at 524,288, so the real ceiling is somewhere between.
+- **OpenCode.** The plugin is written in OpenCode's provider-plugin format —
+  that is the format magpie loads — but it has only been exercised in magpie.
+  `auth.refresh`, `auth.refreshLead` and the `magpie` field in `package.json`
+  are magpie's own, which OpenCode ignores.
+- **Several accounts at once.** magpie keeps one sign-in per provider.
+
+## Development
+
+```sh
 bun test
 ```
 
-## 许可
+The entry point only assembles the hooks. The logic lives in `lib/` as plain
+functions and is reached through `_internal`, because magpie and OpenCode
+both treat every exported function as a plugin of its own.
+
+## License
 
 MIT
