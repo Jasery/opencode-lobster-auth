@@ -42,6 +42,28 @@ test("applyThinking writes the protocol field and drops the marker", () => {
   expect("lobsterai_thinking" in req).toBe(false)
 })
 
+// 29 个模型里有 21 个 thinkingConfig 是 null。给这些模型带上 lobsterai_options
+// 会被上游直接拒掉（实测 code 4000："model does not have a valid thinkingConfig"），
+// 所以没有档位表时绝不能写这个字段。
+test("applyThinking writes nothing for a model without a thinking profile", () => {
+  const req = { model: "qwen3.8-flash", messages: [] }
+  applyThinking(req, undefined)
+  expect("lobsterai_options" in req).toBe(false)
+})
+
+test("applyThinking writes nothing when the profile has no options", () => {
+  const req = { model: "kimi-k2.6", messages: [] }
+  applyThinking(req, { options: [], defaultLevel: "off" })
+  expect("lobsterai_options" in req).toBe(false)
+})
+
+test("applyThinking still drops the marker when it writes nothing", () => {
+  const req = { model: "m", lobsterai_thinking: "high", messages: [] }
+  applyThinking(req, undefined)
+  expect("lobsterai_thinking" in req).toBe(false)
+  expect("lobsterai_options" in req).toBe(false)
+})
+
 test("isKimiK3 matches the family but not unrelated ids", () => {
   expect(isKimiK3("kimi-k3")).toBe(true)
   expect(isKimiK3("kimi-k3-auto-max")).toBe(true)

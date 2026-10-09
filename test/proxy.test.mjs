@@ -85,6 +85,29 @@ test("a good answer is reassembled for a non-streaming caller", async () => {
   expect(seen.reasoning_effort).toBeUndefined()
 })
 
+// 回归：没有档位表的模型（29 个里的 21 个）不能收到 lobsterai_options，
+// 否则上游报 code 4000 直接拒答。
+test("a model without a thinking profile gets no lobsterai_options", async () => {
+  let seen = null
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "tok" }),
+    profileOf: () => undefined,
+    call: async (url, init) => {
+      seen = JSON.parse(init.body)
+      return sseResponse([
+        'data: {"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
+        "data: [DONE]\n\n",
+      ])
+    },
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST",
+    body: JSON.stringify({ model: "qwen3.8-flash", stream: false, messages: [] }),
+  })
+  expect(res.status).toBe(200)
+  expect("lobsterai_options" in seen).toBe(false)
+})
+
 test("a real 401 passes straight through", async () => {
   const f = makeFetch({
     getAuth: async () => ({ type: "api", key: "tok" }),
