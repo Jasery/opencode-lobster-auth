@@ -5,9 +5,16 @@
   "type": "module",
   "main": "./index.mjs",
   "exports": "./index.mjs",
-  "files": ["index.mjs", "lib", "README.md", "README.zh-CN.md"],
+  "files": ["index.mjs", "lib", "README.md", "README.zh-CN.md", "LICENSE"],
   "keywords": ["opencode", "opencode-plugin", "magpie", "lobster", "lobsterai", "youdao"],
   "license": "MIT",
+  "author": "Jasery <jaserydev@163.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jasery/opencode-lobster-auth.git"
+  },
+  "homepage": "https://github.com/Jasery/opencode-lobster-auth#readme",
+  "bugs": "https://github.com/Jasery/opencode-lobster-auth/issues",
   "scripts": { "test": "bun test" },
   "magpie": {
     "maxConcurrency": 8,
