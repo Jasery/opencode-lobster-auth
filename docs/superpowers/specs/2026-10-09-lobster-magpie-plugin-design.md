@@ -108,12 +108,18 @@ D:\git\magpie-lobster\
 
 两条路径，用同一个 `accountId`（`user.yid`），因此先用 B 再用 A 登录同一账号时，A 会原地替换 B。
 
-| | 方式 | 存成 | magpie 是否续期 |
-| --- | --- | --- | --- |
-| A | 浏览器登录 | `oauth`（带 `refresh`/`access`/`expires`） | 会，走 `auth.refresh` |
-| B | 从本机 LobsterAI 导入 | `api`（无 `expires`） | 不会 |
+| | 方式 | `access`/`refresh` | `expires` | `source` | magpie 是否续期 |
+| --- | --- | --- | --- | --- | --- |
+| A | 浏览器登录 | 真 token | 真到期时间 | — | 会，走 `auth.refresh` |
+| B | 从本机 LobsterAI 导入 | 都是 `""` | `0` | `"desktop"` | 不会 |
 
-B 不续期不是靠代码判断，而是结构性保证：magpie 只对「带 `expires` 的 OAuth 账号」做续期，`api` 类型没有 `expires`，因此探测来的 token 不会被续期，桌面端会话不会被搅动。
+两条路径**都是 `oauth` 账号**，靠 `expires` 与 `source` 区分续期行为。
+
+**为什么 B 不能存成 `{type:"api"}`**（早期设计的错误）：`api` 类型会让 magpie 强制从 stdin 读一个 key（实测 `magpie: no key on stdin: EOF`），而这条路不需要用户输入任何东西。加 `prompts` 也不能绕过——它要求真实 TTY。
+
+**为什么 B 不保存 token**：抄一份 `refreshToken` 会让桌面端和插件共用同一个凭据，谁先续期谁就把对方踢下线。B 因此一个字节的凭据都不存，只在每次请求时现读桌面端的库。
+
+B 不续期是结构性保证：magpie 只对 `expires` 非零的 OAuth 账号做续期（实测 `expires: 0` 的 `oauth` 账号同样不会被续期），因此桌面端会话不会被搅动。现读则保证桌面端续期后插件自动跟上。
 
 ### 4.1 路径 A：浏览器登录
 
@@ -166,9 +172,15 @@ function K(t, e = {}) {
 - `bun:sqlite` 以只读模式打开，绝不写入。
 - 数据库可能被运行中的桌面端占用；打开失败或读取失败时降级为清晰的错误提示，引导用户改用浏览器登录。
 - 按平台解析路径：Windows `%APPDATA%\LobsterAI`、macOS `~/Library/Application Support/LobsterAI`、Linux `~/.config/LobsterAI`。
-- 解析 JWT 取 `exp` 与 `yid`，作为 `accountId` 与过期提示。
+- 解析 JWT 取 `yid` 与 `sub`，作为 `accountId`（`user.yid ?? String(user.id)`）与 `uid`。
 
-作为 `auth.methods` 中的 `{type:"api"}` 方法（无 `prompts`），`authorize()` 返回 `{type:"success", key: accessToken, metadata}`，其中 `metadata` 记录 `accountId`（`user.yid`）、昵称与 JWT 的 `exp`，用于在 UI 上显示这是「导入的登录」及其到期时间。
+作为 `auth.methods` 中的 `{type:"oauth"}` 方法，`authorize()` 返回 `{url:"", instructions, method:"auto", callback}` —— `url` 为空则 magpie 不打开任何页面、不需要任何输入，`callback()` 返回：
+
+```js
+const account = { type:"success", refresh:"", access:"", expires:0, source:"desktop", accountId, uid }
+```
+
+`desktopToken(env)` 每次调用现读 sqlite 并返回当前 `accessToken`；读不到时抛 `{signIn:"expired"}`，让 magpie 给账号打上失效标记并提示重新登录。这与社区插件 `@magpie-community/opencode-workbuddy-auth` 的 `desktopSignIn`/`current` 模式一致。
 
 ### 4.3 续期策略
 
@@ -180,7 +192,7 @@ magpie 的官方文档确认了本策略所依赖的机制：
 
 > OAuth 账号的 `expires` 距现在不到 `refreshLead` 时，在这个账号的 loader、`provider.models`、`auth.usage` 或请求之前运行。**`expires` 为 0 或没有的账号不会续期。**
 
-这正是路径 B「结构性不续期」的依据：把它存成 `{type:"api", key}`（没有 `expires`），magpie 不会对它调用 `auth.refresh`，桌面端的会话因此不会被搅动。而 `auth.refresh` 的实现只需处理路径 A 的账号。
+这正是路径 B「结构性不续期」的依据：把它存成 `{type:"oauth", access:"", refresh:"", expires:0, source:"desktop"}`，`expires` 为 0，magpie 不会对它调用 `auth.refresh`，桌面端的会话因此不会被搅动。而 `auth.refresh` 的实现只需处理路径 A 的账号（并额外用 `auth.source !== "desktop"` 做一道防御）。
 
 ## 5. 模型与用量
 
@@ -235,6 +247,8 @@ variants: Object.fromEntries(
 ## 6. 请求管线
 
 `loader` 返回 `{baseURL: "https://lobsterai-server.youdao.com/api/proxy/v1", apiKey, headers, fetch}`。模型 `npm` 用 `@ai-sdk/openai-compatible`。
+
+`apiKey` 只用于让 magpie 认为账号「已登录」；真正的 token 由注入的 `tokenOf(auth)` 在**每次请求时**现取（路径 B 尤其需要，因为它的 `access` 是空的），`makeFetch` 因此不自己写死「oauth 读 `access`、api 读 `key`」。
 
 职责划分：
 
@@ -338,7 +352,9 @@ variants: Object.fromEntries(
 
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
-| `/api/auth/refresh` 行为未知（轮换 vs 不轮换） | 续期可能失败或挤掉桌面端 | 本阶段不主动调用；路径 B 结构性不续期 |
+| `/api/auth/refresh` 行为未知（轮换 vs 不轮换） | 续期可能失败或挤掉桌面端 | 本阶段不主动调用；路径 B 因 `expires` 为 0 结构性不续期 |
+| 桌面端退出登录 / 卸载后路径 B 立刻失效 | 用户需重新登录 | `desktopToken()` 抛 `{signIn:"expired"}`，magpie 标记账号失效并提示；比继续用已失效的旧 token 更诚实 |
+| `lobsterai_options` 只被有档位表的模型接受（实测 29 个中 21 个 `thinkingConfig` 为 `null`） | 下发即报 `4000`，整轮对话失败 | `applyThinking` 只在 `profile.options` 非空时才写入；无档位表的模型不下发该字段，实测照常返回 `reasoning_content` |
 | 桌面端运行中占用 sqlite | 导入失败 | 只读打开 + 清晰降级提示 |
 | 企业账号走不同 portal 路径（`EnterpriseIdentitySelect`） | 登录失败 | 本阶段只支持个人账号，README 说明 |
 | `costMultiplier` 分时变动 | 静态费率过期 | 以线上拉取为准 |
