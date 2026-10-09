@@ -148,7 +148,7 @@ function K(t, e = {}) {
 - 按平台解析路径：Windows `%APPDATA%\LobsterAI`、macOS `~/Library/Application Support/LobsterAI`、Linux `~/.config/LobsterAI`。
 - 解析 JWT 取 `exp` 与 `yid`，作为 `accountId` 与过期提示。
 
-作为 `auth.methods` 中的 `{type:"api"}` 方法（无 `prompts`），`authorize()` 返回 `{type:"success", key: accessToken, metadata}`。
+作为 `auth.methods` 中的 `{type:"api"}` 方法（无 `prompts`），`authorize()` 返回 `{type:"success", key: accessToken, metadata}`，其中 `metadata` 记录 `accountId`（`user.yid`）、昵称与 JWT 的 `exp`，用于在 UI 上显示这是「导入的登录」及其到期时间。
 
 ### 4.3 续期策略
 
@@ -165,7 +165,7 @@ function K(t, e = {}) {
 | LobsterAI | magpie |
 | --- | --- |
 | `modelId` / `modelName` | `id` / `name` |
-| `contextWindow` | `limit.context`；`limit.output` 默认 32000（接口未提供） |
+| `contextWindow` | `limit.context`；`limit.output` 用保守默认 32000（接口未提供该字段，见 §8） |
 | `supportsThinking` | `reasoning` |
 | —（实测支持工具调用） | `tool_call: true` |
 | `supportsImage` | `modalities.input` 追加 `image` |
@@ -190,7 +190,12 @@ function K(t, e = {}) {
 
 ## 6. 请求管线
 
-`loader` 返回 `{baseURL: "https://lobsterai-server.youdao.com/api/proxy/v1", apiKey, headers, fetch}`，所有请求经 `lib/proxy.mjs`。模型 `npm` 用 `@ai-sdk/openai-compatible`。
+`loader` 返回 `{baseURL: "https://lobsterai-server.youdao.com/api/proxy/v1", apiKey, headers, fetch}`。模型 `npm` 用 `@ai-sdk/openai-compatible`。
+
+职责划分：
+
+- `headers`：注入客户端标识头（`X-LobsterAI-Client-Version`、`X-LobsterAI-Client-Capabilities`），对每个请求生效。
+- `fetch`：`lib/proxy.mjs` 的请求管线，负责鉴权头、请求体改写（§6 坑 3）与响应改写（坑 1、坑 2）。
 
 三个必须处理的坑，全部实测确认：
 
@@ -208,12 +213,18 @@ function K(t, e = {}) {
 
 上游把错误放进 SSE：`event:error` + `data:{"type":"error","error":{...,"code":40300}}`。原样透传会导致 magpie 永远不会故障切换。
 
-处理：先窥探流首段，若为 `event:error` 则转成真正的非 2xx JSON 响应：
+处理：先窥探流首段，若为 `event:error` 则转成真正的非 2xx JSON 响应，响应体保留上游的 `{code, message}`，状态码按 `code` 映射：
 
-- `40100` → 401，并带 `X-Magpie-Sign-In: expired`
-- 其余 → 403 / 429 / 400，按 `code` 归类
+| 上游 `code` | HTTP 状态 | 理由 |
+| --- | --- | --- |
+| `40100` | 401 | 登录过期，并带 `X-Magpie-Sign-In: expired` 标记账号 |
+| `40300`（如「不支持的模型」） | 403 | 触发换模型或换账号 |
+| `message` 命中限流关键词（限流 / 频率 / 过快 / rate） | 429 | 触发退避 |
+| 其余 | 400 | 保守归类，仍会触发故障切换 |
 
-若为正常数据，把已读取的前缀拼回，继续流式转发。只有真实 401（`{"code":40100,"message":"登录已过期，请重新登录"}`）本来就是 HTTP 401。
+`40100` 与 `40300` 是实测观察到的；限流分支按 `message` 关键词判断，因为尚未观察到真实的限流响应，具体 `code` 待实测收敛（见 §8）。
+
+若为正常数据，把已读取的前缀拼回，继续流式转发。只有真实 401 本来就是 HTTP 401（响应体为 `{"code":40100,"message":"登录已过期，请重新登录"}`），直通即可。
 
 ### 坑 3：思考档位是私有字段
 
@@ -257,11 +268,14 @@ function K(t, e = {}) {
 
 ## 8. 待实测收敛项
 
-设计中对以下三点采取防御式实现，实测后收敛，不靠猜测：
+设计中对以下各项采取防御式实现，实测后收敛，不靠猜测：
 
 1. magpie 把思考档位传进请求体的确切字段名 —— 先兼容多种来源，实测后收窄。
 2. `/api/auth/exchange` 是否接受最小 body —— 先用假 code 探测参数校验，不消耗真实凭证。
 3. 上游对非流式请求是否真的从不返回 JSON —— 若某模型返回 JSON 则直通，不做重组。
+4. 真实的限流响应长什么样（`code` 与文案）—— 未观察到，暂按关键词判断，见 §6 坑 2。
+5. `limit.output` 的真实上限 —— 接口未提供，先用 32000 的保守值，实测后按模型校准。
+6. `variants` 的键名能否驱动 magpie 传出对应档位 —— 与第 1 点同源，一起收敛。
 
 ## 9. 风险
 
