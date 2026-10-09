@@ -8,6 +8,8 @@
 
 **Tech Stack:** Bun（宿主，内置 `bun:sqlite`、`node:http`、`node:crypto`）、`@ai-sdk/openai-compatible`（线协议）、`bun test`（单元测试）。零运行时依赖。
 
+> **修订（2026-10-09，晚于本计划）：** Task 5 里的 `variantsOf` 直接拿 `o.level` 当变体键（`[o.level, { [MARKER]: o.level }]`，见下文 5 处），**这会让最低档 `off` 永远选不中** —— magpie 不用 variants 的值对象，而是把入参 `reasoning_effort` 映射到「模型声明过的档位名」再下发，而它的档位阶梯（`none/minimal/low/medium/high/xhigh/max`）里没有 `off`。正确做法是：对外用 `none` 当键，写给上游时换回 `off`。以 `lib/thinking.mjs` 和设计文档 §5.1 为准；照本计划原样重做会把该缺陷带回来。
+
 ## Global Constraints
 
 - 包名 `opencode-lobster-auth`，`type: "module"`，`main: "./index.mjs"`。
