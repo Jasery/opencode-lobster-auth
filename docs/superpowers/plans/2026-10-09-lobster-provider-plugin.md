@@ -2100,11 +2100,18 @@ $env:XDG_CONFIG_HOME = Join-Path $sb ".config"
 $env:XDG_CACHE_HOME = Join-Path $sb ".cache"
 $env:MAGPIE_ADDR = "127.0.0.1:3499"
 $magpie = "$env:LOCALAPPDATA\Programs\magpie\magpie.exe"
-& $magpie plugin add D:\git\magpie-lobster < $null
+& $magpie plugin add D:\git\magpie-lobster
 & $magpie plugin --json
 ```
 
-Expected: 输出里 provider 为 `lobster`，有两个登录方式，且**没有**加载错误。
+> **注意：** 不要写 `& $magpie plugin add ... < $null`。`<` 在 PowerShell 里是
+> 保留运算符（"“<”运算符保留供将来使用"），这样写会直接解析失败。实测
+> `plugin add` 不会交互提问，不需要重定向 stdin。
+
+Expected: `plugins[].providers` 里出现 `lobster`，有两个登录方式，且**没有**加载错误。
+
+> 提示：Task 1 的 `index.mjs` 只有 `config` 钩子，此时 `providers` 会是空数组——
+> provider 由 `auth` 钩子声明，要等 Task 11 装配完才出现。冒烟测试必须在 Task 11 之后跑。
 
 - [ ] **Step 7: 真实调用验证**
 
