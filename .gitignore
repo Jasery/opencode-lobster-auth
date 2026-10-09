@@ -1,6 +1,7 @@
 node_modules/
 *.log
 *.tgz
+.npmrc
 .DS_Store
 Thumbs.db
 
