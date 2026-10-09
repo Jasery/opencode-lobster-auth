@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+
+# 沙箱冒烟测试用的临时 HOME / magpie 配置
+.sandbox/
+tmp/
