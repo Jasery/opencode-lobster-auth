@@ -47,6 +47,26 @@ magpie 的插件机制等价于 OpenCode v1 的 provider 插件：一个 npm 包
 
 模型条目字段：`modelId`、`modelName`、`provider:"LobsterAI"`、`apiFormat:"openai"`、`supportsImage`、`supportsThinking`、`thinkingConfig{options[{level,openclawLevel}],defaultLevel}`、`requestCapabilities:["lobsterai-options-v1"]`、`contextWindow`（多为 `1000000`）、`costMultiplier`、`description`、`accessible`、`restrictionHint`。
 
+### 两种错误形态
+
+`/api/*` 系列端点（`exchange`、`models/available`、`quota`、`profile-summary`）统一用 `{code, message, data}` 信封，且**业务错误也返回 HTTP 200**。实测：
+
+```
+POST /api/auth/exchange  {"authCode":"无效码"}
+→ HTTP 200  {"code":40102,"message":"无效或已过期的授权码","data":null}
+```
+
+只有 `/api/proxy/v1/chat/completions` 例外：它把错误塞进 SSE 的 `event:error`（见 §6 坑 2），而登录过期是真 HTTP 401。
+
+因此插件要处理**两种**错误形态：
+
+- JSON 信封 —— 判断 `code !== 0`（用于 exchange、模型列表、用量）。
+- SSE 事件 —— 用于推理端点。
+
+### 客户端标识头可选
+
+实测 `GET /api/models/available` 不带 `X-LobsterAI-Client-Version` / `X-LobsterAI-Client-Capabilities` 也正常返回 29 个模型。插件仍会带上这两个头，因为它们可能影响上游的特性开关（如 `kimi-k3-agentic-v1`）。
+
 ## 3. 架构与文件布局
 
 ```
@@ -156,6 +176,12 @@ function K(t, e = {}) {
 
 `refreshLead` 取一个保守值（默认 `6h`），让 magpie 在过期前续期。
 
+magpie 的官方文档确认了本策略所依赖的机制：
+
+> OAuth 账号的 `expires` 距现在不到 `refreshLead` 时，在这个账号的 loader、`provider.models`、`auth.usage` 或请求之前运行。**`expires` 为 0 或没有的账号不会续期。**
+
+这正是路径 B「结构性不续期」的依据：把它存成 `{type:"api", key}`（没有 `expires`），magpie 不会对它调用 `auth.refresh`，桌面端的会话因此不会被搅动。而 `auth.refresh` 的实现只需处理路径 A 的账号。
+
 ## 5. 模型与用量
 
 ### 5.1 模型发现
@@ -170,11 +196,29 @@ function K(t, e = {}) {
 | —（实测支持工具调用） | `tool_call: true` |
 | `supportsImage` | `modalities.input` 追加 `image` |
 | `costMultiplier` | `rate`（如 `deepseek-flash` 0.1、`deepseek-v4-pro` 0.52） |
-| `thinkingConfig.options` | `variants` |
+| `thinkingConfig.options` | `variants`（见下） |
 
 `accessible === false` 的模型跳过。拉取失败时返回 `provider.models`（magpie 会保留上一份列表）；401 抛出 `{signIn:"expired"}` 标记账号需要重新登录。
 
 `config` 钩子同时声明一份静态兜底模型表（`lib/constants.mjs`），供未登录状态显示。
+
+#### variants 是档位的传递通道
+
+从已安装的社区插件（`opencode-qoder-auth`、`opencode-workbuddy-auth`）确认了 `variants` 的确切语义：**它的键是档位名，值对象会被合并进请求体**。qoder 就是这么把档位传给上游的：
+
+```js
+variants: Object.fromEntries(m.efforts.map((e) => [e, { reasoningEffort: e }]))
+```
+
+LobsterAI 的档位名与上游 `level` 取值同域（`off|high|max` 等），因此直接以 `level` 为键，并在值里放一个插件自读的标记：
+
+```js
+variants: Object.fromEntries(
+  profile.options.map((o) => [o.level, { lobsterai_thinking: o.level }])
+)
+```
+
+`lib/proxy.mjs` 读取该标记（或退而读取 `reasoning_effort` / `reasoningEffort` / `thinking.level`），删掉标记字段，再按 §6 坑 3 写入 `lobsterai_options`。这样档位走的是 magpie 的标准通道，不依赖上游认识 `reasoning_effort`。
 
 ### 5.2 用量
 
@@ -268,14 +312,27 @@ function K(t, e = {}) {
 
 ## 8. 待实测收敛项
 
-设计中对以下各项采取防御式实现，实测后收敛，不靠猜测：
+### 已实测确认（不再是假设）
 
-1. magpie 把思考档位传进请求体的确切字段名 —— 先兼容多种来源，实测后收窄。
-2. `/api/auth/exchange` 是否接受最小 body —— 先用假 code 探测参数校验，不消耗真实凭证。
-3. 上游对非流式请求是否真的从不返回 JSON —— 若某模型返回 JSON 则直通，不做重组。
-4. 真实的限流响应长什么样（`code` 与文案）—— 未观察到，暂按关键词判断，见 §6 坑 2。
-5. `limit.output` 的真实上限 —— 接口未提供，先用 32000 的保守值，实测后按模型校准。
-6. `variants` 的键名能否驱动 magpie 传出对应档位 —— 与第 1 点同源，一起收敛。
+- **`lobsterai_options.thinking.level` 确实生效。** 同一问题问 `deepseek-flash`：
+
+  | `thinking.level` | `reasoning_content` 体积 |
+  | --- | --- |
+  | `off` | 约 0 字节 |
+  | `max` | 约 16.8 KB |
+  | 不带该字段 | 约 19.3 KB |
+
+  即 `off` 会真正关掉思考，`max` 与默认档位都产出思考。上游侧的字段名与语义已坐实。
+- **`POST /api/auth/exchange` 接受最小 body。** 只发 `{"authCode": …}` 也能进入业务逻辑（返回 `40102 无效或已过期的授权码`，而非参数校验错误）。`firstKeyfrom`/`latestKeyfrom`/`uuid`/`userId`/`version` 均非必需，但保留它们更贴近真实客户端。
+- **客户端标识头可选。** `GET /api/models/available` 不带它们也返回完整列表。
+
+### 仍待收敛（防御式实现，实测后收窄）
+
+1. `variants` 的标记字段能否原样到达 `fetch` —— 已从社区插件确认 variants 的值对象会合并进请求体，但仍需实测 magpie 是否保留插件自定义的标记键；不行就退回读取 `reasoning_effort`。
+2. 上游对非流式请求是否真的从不返回 JSON —— 若某模型返回 JSON 则直通，不做重组。
+3. 真实的限流响应长什么样（`code` 与文案）—— 未观察到，暂按关键词判断，见 §6 坑 2。
+4. `limit.output` 的真实上限 —— 接口未提供，先用 32000 的保守值，实测后按模型校准。
+5. `variants` 的键名能否驱动 magpie 传出对应档位 —— 与第 1 点同源，一起收敛。
 
 ## 9. 风险
 
