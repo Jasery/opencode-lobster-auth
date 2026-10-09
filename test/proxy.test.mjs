@@ -31,6 +31,7 @@ const sseResponse = (lines) => new Response(
 test("an event:error in a 200 becomes a real non-2xx", async () => {
   const f = makeFetch({
     getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
     profileOf: () => undefined,
     call: async () => sseResponse([
       'event: error\ndata: {"type":"error","error":{"message":"不支持的模型: x","code":40300}}\n\n',
@@ -47,6 +48,7 @@ test("an event:error in a 200 becomes a real non-2xx", async () => {
 test("a lapsed sign-in is reported as 401 with X-Magpie-Sign-In", async () => {
   const f = makeFetch({
     getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
     profileOf: () => undefined,
     call: async () => sseResponse([
       'event: error\ndata: {"type":"error","error":{"message":"登录已过期，请重新登录","code":40100}}\n\n',
@@ -63,6 +65,7 @@ test("a good answer is reassembled for a non-streaming caller", async () => {
   let seen = null
   const f = makeFetch({
     getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
     profileOf: () => ({ options: [{ level: "off", openclawLevel: "off" }], defaultLevel: "off" }),
     call: async (url, init) => {
       seen = JSON.parse(init.body)
@@ -91,6 +94,7 @@ test("a model without a thinking profile gets no lobsterai_options", async () =>
   let seen = null
   const f = makeFetch({
     getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
     profileOf: () => undefined,
     call: async (url, init) => {
       seen = JSON.parse(init.body)
@@ -108,9 +112,29 @@ test("a model without a thinking profile gets no lobsterai_options", async () =>
   expect("lobsterai_options" in seen).toBe(false)
 })
 
+// 桌面端导入的账号不存 token，每次现读；读不到就是账号失效。
+// 这里不能让请求带着空 token 发出去 —— 那会被上游当成匿名请求。
+test("a resolver that cannot read the token reports a lapsed account", async () => {
+  let called = false
+  const f = makeFetch({
+    getAuth: async () => ({ type: "oauth", source: "desktop" }),
+    tokenOf: async () => { throw Object.assign(new Error("桌面端未登录"), { signIn: "expired" }) },
+    profileOf: () => undefined,
+    call: async () => { called = true; return new Response("{}", { status: 200 }) },
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST", body: JSON.stringify({ model: "m", stream: true, messages: [] }),
+  })
+  expect(res.status).toBe(401)
+  expect(res.headers.get("X-Magpie-Sign-In")).toBe("expired")
+  expect((await res.json()).error.message).toContain("桌面端未登录")
+  expect(called).toBe(false)
+})
+
 test("a real 401 passes straight through", async () => {
   const f = makeFetch({
     getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
     profileOf: () => undefined,
     call: async () => new Response('{"code":40100,"message":"登录已过期，请重新登录"}', { status: 401 }),
   })

@@ -4,7 +4,7 @@
 
 **Goal:** 交付一个可 `magpie plugin add` 加载的本地文件夹插件，把有道 LobsterAI 账号下的约 30 个模型暴露为 magpie provider `lobster`。
 
-**Architecture:** 单包 `opencode-lobster-auth`，入口 `index.mjs` 只装配钩子；所有逻辑放在 `lib/` 下的纯函数模块里，通过 `_internal` 导出供 `bun test` 测试。鉴权两条路径（浏览器登录存成 `oauth`、从本机 sqlite 导入存成 `api`）；`loader.fetch` 承担请求改写（思考档位、Kimi-K3 契约）与响应改写（SSE 重组、错误状态码还原）。
+**Architecture:** 单包 `opencode-lobster-auth`，入口 `index.mjs` 只装配钩子；所有逻辑放在 `lib/` 下的纯函数模块里，通过 `_internal` 导出供 `bun test` 测试。鉴权两条路径（浏览器登录存真 token 的 `oauth`、从本机 sqlite 导入的 `oauth` 不存 token 而是每次现读）；`loader.fetch` 承担请求改写（思考档位、Kimi-K3 契约）与响应改写（SSE 重组、错误状态码还原）。
 
 **Tech Stack:** Bun（宿主，内置 `bun:sqlite`、`node:http`、`node:crypto`）、`@ai-sdk/openai-compatible`（线协议）、`bun test`（单元测试）。零运行时依赖。
 
@@ -20,7 +20,7 @@
 - 客户端头：`X-LobsterAI-Client-Version: 2026.9.23`、`X-LobsterAI-Client-Capabilities: kimi-k3-agentic-v1,thinking-level-control-v1`。
 - 模型 `npm` 用 `@ai-sdk/openai-compatible`（对应 `/chat/completions`）。
 - **绝不主动调用 `POST /api/auth/refresh`**（会轮换用户真实 refreshToken，有把用户挤下线的风险）。`auth.refresh` 只对路径 A 的账号生效。
-- 路径 B 的账号必须存成 `{type:"api", key}`（无 `expires`），以保证 magpie 永不续期。
+- 路径 B 的账号必须存成 `{type:"oauth", access:"", refresh:"", expires:0, source:"desktop"}`：`expires` 为 0 才能保证 magpie 永不续期，不存 token 才能保证不与桌面端共用 refreshToken。**不能存成 `{type:"api"}`** —— api 类型会让 magpie 强制从 stdin 读一个 key，而这条路不需要任何输入。
 - 所有对 `%APPDATA%\LobsterAI\lobsterai.sqlite` 的访问必须只读，绝不写入。
 - 提交信息用中文，遵循 `type: 描述` 格式。
 
@@ -709,6 +709,27 @@ test("applyThinking writes the protocol field and drops the marker", () => {
   expect("lobsterai_thinking" in req).toBe(false)
 })
 
+// 实测 29 个模型里有 21 个 thinkingConfig 是 null。对它们下发
+// lobsterai_options 会让上游直接报 4000，整轮对话失败。
+test("applyThinking writes nothing for a model without a thinking profile", () => {
+  const req = { model: "m", lobsterai_thinking: "high", messages: [] }
+  applyThinking(req, undefined)
+  expect("lobsterai_options" in req).toBe(false)
+})
+
+test("applyThinking writes nothing when the profile has no options", () => {
+  const req = { model: "m", lobsterai_thinking: "high", messages: [] }
+  applyThinking(req, { options: [], defaultLevel: "high" })
+  expect("lobsterai_options" in req).toBe(false)
+})
+
+test("applyThinking still drops the marker when it writes nothing", () => {
+  const req = { model: "m", lobsterai_thinking: "high", messages: [] }
+  applyThinking(req, undefined)
+  // 标记必须清掉，否则会原样漏给上游
+  expect("lobsterai_thinking" in req).toBe(false)
+})
+
 test("isKimiK3 matches the family but not unrelated ids", () => {
   expect(isKimiK3("kimi-k3")).toBe(true)
   expect(isKimiK3("kimi-k3-auto-max")).toBe(true)
@@ -793,6 +814,13 @@ export function levelOf(req, profile) {
 export function applyThinking(req, profile) {
   const level = levelOf(req, profile)
   delete req[MARKER]
+  // 关键：只有当模型真的有档位表时才下发这个字段。
+  // 实测 29 个模型里有 21 个 thinkingConfig 是 null，对它们下发
+  // lobsterai_options 会直接报 4000（"model does not have a valid
+  // thinkingConfig"），整轮对话失败 —— 而这个字段只是用来控制思考档位的，
+  // 不下发时模型照样正常思考（reasoning_content 照常返回）。
+  const opts = profile?.options
+  if (!Array.isArray(opts) || opts.length === 0) return
   req[OPTIONS_FIELD] = { version: OPTIONS_VERSION, thinking: { level } }
 }
 
@@ -840,7 +868,7 @@ git commit -m "feat: 思考档位映射与 Kimi-K3 契约"
 - Test: `test/proxy.test.mjs`
 
 **Interfaces:**
-- Consumes: Task 3 `sse`/`first`/`chain`、Task 4 `respond`、Task 5 `applyThinking`/`applyKimiK3`/`isKimiK3`
+- Consumes: Task 3 `sse`/`first`（`chain` 由 `first` 内部使用，Task 6 不再直接用）、Task 4 `respond`、Task 5 `applyThinking`/`applyKimiK3`/`isKimiK3`
 - Produces:
   - `errorOf(data)` → `{code, message}`（解析 SSE `event:error` 的载荷）
   - `statusFor(code, message)` → `number`
@@ -884,6 +912,7 @@ const sseResponse = (lines) => new Response(
 test("an event:error in a 200 becomes a real non-2xx", async () => {
   const f = makeFetch({
     getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
     profileOf: () => undefined,
     call: async () => sseResponse([
       'event: error\ndata: {"type":"error","error":{"message":"不支持的模型: x","code":40300}}\n\n',
@@ -900,6 +929,7 @@ test("an event:error in a 200 becomes a real non-2xx", async () => {
 test("a lapsed sign-in is reported as 401 with X-Magpie-Sign-In", async () => {
   const f = makeFetch({
     getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
     profileOf: () => undefined,
     call: async () => sseResponse([
       'event: error\ndata: {"type":"error","error":{"message":"登录已过期，请重新登录","code":40100}}\n\n',
@@ -916,6 +946,7 @@ test("a good answer is reassembled for a non-streaming caller", async () => {
   let seen = null
   const f = makeFetch({
     getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
     profileOf: () => ({ options: [{ level: "off", openclawLevel: "off" }], defaultLevel: "off" }),
     call: async (url, init) => {
       seen = JSON.parse(init.body)
@@ -938,9 +969,29 @@ test("a good answer is reassembled for a non-streaming caller", async () => {
   expect(seen.reasoning_effort).toBeUndefined()
 })
 
+// 桌面端导入的账号不存 token，每次现读；读不到就是账号失效。
+// 这里不能让请求带着空 token 发出去 —— 那会被上游当成匿名请求。
+test("a resolver that cannot read the token reports a lapsed account", async () => {
+  let called = false
+  const f = makeFetch({
+    getAuth: async () => ({ type: "oauth", source: "desktop" }),
+    tokenOf: async () => { throw Object.assign(new Error("桌面端未登录"), { signIn: "expired" }) },
+    profileOf: () => undefined,
+    call: async () => { called = true; return new Response("{}", { status: 200 }) },
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST", body: JSON.stringify({ model: "m", stream: true, messages: [] }),
+  })
+  expect(res.status).toBe(401)
+  expect(res.headers.get("X-Magpie-Sign-In")).toBe("expired")
+  expect((await res.json()).error.message).toContain("桌面端未登录")
+  expect(called).toBe(false)
+})
+
 test("a real 401 passes straight through", async () => {
   const f = makeFetch({
     getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
     profileOf: () => undefined,
     call: async () => new Response('{"code":40100,"message":"登录已过期，请重新登录"}', { status: 401 }),
   })
@@ -967,7 +1018,7 @@ Expected: FAIL — `Cannot find module '../lib/proxy.mjs'`
 //      永不故障切换。
 // 另外思考档位要翻译成私有字段（见 lib/thinking.mjs）。
 
-import { sse, first, chain } from "./sse.mjs"
+import { sse, first } from "./sse.mjs"
 import { respond } from "./assemble.mjs"
 import { applyThinking, applyKimiK3, isKimiK3 } from "./thinking.mjs"
 import { CLIENT_VERSION, CAPABILITIES } from "./constants.mjs"
@@ -1001,13 +1052,21 @@ function errorResponse(status, code, message) {
   )
 }
 
-export function makeFetch({ getAuth, profileOf, call }) {
+// tokenOf 由调用方注入：桌面端导入的账号自己不存 token，得每次现读，
+// 因此这里不能写死「oauth 读 access、api 读 key」。
+export function makeFetch({ getAuth, tokenOf, profileOf, call }) {
   return async function lobsterFetch(input, init) {
     const auth = await getAuth()
     if (auth?.type !== "api" && auth?.type !== "oauth") {
       return errorResponse(401, 40100, "LobsterAI: 尚未登录")
     }
-    const token = auth.type === "oauth" ? auth.access : auth.key
+    let token = ""
+    try {
+      token = await tokenOf(auth)
+    } catch (e) {
+      // 桌面端退出登录 / 库读不到：带上失效标记，让 magpie 提示重新登录
+      return errorResponse(401, 40100, e?.message ?? "LobsterAI: 登录信息不可用")
+    }
     if (!token) return errorResponse(401, 40100, "LobsterAI: 登录信息不完整")
 
     let req
@@ -1043,7 +1102,9 @@ export function makeFetch({ getAuth, profileOf, call }) {
       const { code, message } = errorOf(head.data)
       return errorResponse(statusFor(code, message), code, message || "LobsterAI 返回了一个错误")
     }
-    const out = await respond(req, head ? chain([head], rest) : rest)
+    // 注意：Task 3 的 first() 已经把 head 放回 rest 里了，这里不能再拼一次，
+    // 否则第一个 chunk 会重复。直接用 rest。
+    const out = await respond(req, rest)
     // 成功也要带 kept：插件不自己续期，用的就是存下来的 token。
     // magpie 靠这个头把账号上的失效标记清掉。
     out.headers.set("X-Magpie-Sign-In", "kept")
@@ -1384,7 +1445,8 @@ git commit -m "feat: 用量映射"
 - Produces:
   - `dbPath(env)` → `string`
   - `readCredentials(path)` → `{accessToken, refreshToken, yid, id, nickname}`，读不到返回 `null`
-  - `importAuth(env)` → magpie 的 api 账号 `{type:"api", key, metadata}`，失败抛错
+  - `desktopSignIn(env)` → magpie 的 oauth 账号 `{type:"success", refresh:"", access:"", expires:0, source:"desktop", accountId, uid}`，失败抛错
+  - `desktopToken(env)` → 现读桌面端当前 token `string`；读不到抛 `{signIn:"expired"}`
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1396,7 +1458,9 @@ import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { dbPath, readCredentials } from "../lib/auth-import.mjs"
+import { mkdirSync } from "node:fs"
+import { dirname } from "node:path"
+import { dbPath, readCredentials, desktopSignIn, desktopToken } from "../lib/auth-import.mjs"
 
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url")
 const TOKEN = `h.${b64({ sub: 67097, yid: "urs-phoneyd.abc@163.com", exp: 1793152423 })}.s`
@@ -1440,6 +1504,67 @@ test("a database without the keys reads as null", () => {
 
 test("a missing file reads as null, not a throw", () => {
   expect(readCredentials(join(tmpdir(), "definitely-absent-lobster.sqlite"))).toBeNull()
+})
+
+// 造一份「桌面端已经登录」的环境：目录按各平台的 dbPath 规则摆好
+function makeDesktop({ tokens = TOKEN } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "lobster-desktop-"))
+  const env = { APPDATA: dir, HOME: dir, USERPROFILE: dir, XDG_CONFIG_HOME: dir }
+  const file = dbPath(env)
+  mkdirSync(dirname(file), { recursive: true })
+  const db = new Database(file, { create: true })
+  db.run("CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)")
+  if (tokens !== null) {
+    db.run("INSERT INTO kv VALUES (?,?,?)", ["auth_tokens", JSON.stringify({ accessToken: tokens, refreshToken: "r" }), 0])
+    db.run("INSERT INTO kv VALUES (?,?,?)", ["auth_user", '{"yid":"urs-phoneyd.abc@163.com","id":67097,"nickname":"Ada"}', 0])
+  }
+  db.close()
+  return { dir, env }
+}
+
+test("the desktop sign-in stores no token of its own", () => {
+  const { dir, env } = makeDesktop()
+  try {
+    const r = desktopSignIn(env)
+    expect(r.type).toBe("success")
+    // 关键：一个字节的凭据都不留。抄一份 refreshToken 会让桌面端和插件
+    // 共用同一个 token，谁先续期谁就把对方踢下线。
+    expect(r.access).toBe("")
+    expect(r.refresh).toBe("")
+    expect(r.expires).toBe(0)
+    expect(r.source).toBe("desktop")
+    expect(r.accountId).toBe("urs-phoneyd.abc@163.com")
+    expect(r.uid).toBe(67097)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test("a desktop sign-in with nothing to read fails loudly", () => {
+  const { dir, env } = makeDesktop({ tokens: null })
+  try {
+    expect(() => desktopSignIn(env)).toThrow(/LobsterAI/)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test("the desktop token is read fresh each time", () => {
+  const { dir, env } = makeDesktop()
+  try {
+    expect(desktopToken(env)).toBe(TOKEN)
+    // 桌面端续期后，插件下一次调用立刻用上新的 token
+    const other = `h.${b64({ sub: 67097, yid: "urs-phoneyd.abc@163.com", exp: 1793152423 })}.s2`
+    const db = new Database(dbPath(env))
+    db.run("UPDATE kv SET value=? WHERE key='auth_tokens'", [JSON.stringify({ accessToken: other, refreshToken: "r" })])
+    db.close()
+    expect(desktopToken(env)).toBe(other)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test("an unreadable desktop token is reported as a lapsed sign-in", () => {
+  const { dir, env } = makeDesktop({ tokens: null })
+  try {
+    let caught = null
+    try { desktopToken(env) } catch (e) { caught = e }
+    expect(caught?.signIn).toBe("expired")
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 test("junk in the row reads as null", () => {
@@ -1521,9 +1646,14 @@ export function readCredentials(path) {
   }
 }
 
-// 存成 {type:"api"}：没有 expires，magpie 因此永不续期（见设计文档 §4.3），
-// 桌面端的会话不会被搅动。
-export function importAuth(env = process.env) {
+// 桌面端这条路只借一个身份，**不存 token**：
+//   access/refresh 都留空，expires 为 0，靠 source:"desktop" 标记来源。
+// token 每次用的时候现读（desktopToken），所以桌面端续期后插件自动跟着用新的。
+//
+// 为什么不把 token 抄一份：抄下来的 refreshToken 会是桌面端和插件共用的，
+// 谁先续期谁就把对方踢下线。留空则 magpie 永不续期（expires 为 0），
+// 桌面端的会话不受任何影响。
+export function desktopSignIn(env = process.env) {
   const path = dbPath(env)
   const c = readCredentials(path)
   if (!c) {
@@ -1532,18 +1662,36 @@ export function importAuth(env = process.env) {
       "请先在 LobsterAI 桌面端登录，或改用「浏览器登录」。",
     )
   }
-  const metadata = {}
-  if (c.yid) metadata.accountId = c.yid
-  if (c.nickname) metadata.nickname = c.nickname
-  if (c.expires) metadata.expires = c.expires
-  return { type: "success", key: c.accessToken, metadata }
+  return {
+    type: "success",
+    refresh: "",
+    access: "",
+    expires: 0,
+    source: "desktop",
+    accountId: c.yid ?? (c.id !== undefined ? String(c.id) : undefined),
+    uid: c.id,
+  }
+}
+
+// 桌面端账号的 token：每次现读，桌面端换了 token 插件立刻跟上。
+// 读不到就是账号不可用（桌面端退出登录、库被删、文件被加密），
+// 报 signIn:"expired" 让 magpie 给账号打上失效标记，提示用户重新登录。
+export function desktopToken(env = process.env) {
+  const c = readCredentials(dbPath(env))
+  if (!c) {
+    throw Object.assign(
+      new Error("LobsterAI 桌面端未登录，或它的登录信息已不可读"),
+      { signIn: "expired" },
+    )
+  }
+  return c.accessToken
 }
 ```
 
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `bun test test/auth-import.test.mjs`
-Expected: PASS — 5 pass
+Expected: PASS — 9 pass
 
 - [ ] **Step 5: 提交**
 
@@ -1756,7 +1904,8 @@ test("signIn completes the loopback callback and returns an oauth account", asyn
     port: 0,
     async fetch(req) {
       const u = new URL(req.url)
-      if (u.pathname === "/auth/exchange") {
+      // 注意：这里只替换 origin，pathname 仍然是 /api/auth/exchange
+      if (u.pathname === "/api/auth/exchange") {
         return Response.json({ code: 0, message: "OK", data: { accessToken: token, refreshToken: "rt" } })
       }
       return new Response("nope", { status: 404 })
@@ -1826,6 +1975,8 @@ git commit -m "feat: 浏览器登录"
 
 ```js
 import { test, expect } from "bun:test"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { LobsterAuthPlugin as plugin, _internal } from "../index.mjs"
 import { PROVIDER } from "../lib/constants.mjs"
 
@@ -1856,16 +2007,64 @@ test("config declares the provider when absent", async () => {
 
 test("both sign-in methods are offered", async () => {
   const hooks = await plugin({})
-  const kinds = hooks.auth.methods.map((m) => m.type).sort()
-  expect(kinds).toEqual(["api", "oauth"])
+  const kinds = hooks.auth.methods.map((m) => m.type)
+  // 两条都必须是 oauth：api 类型会逼 magpie 从 stdin 读一个 key，
+  // 而「导入本机登录」这条路不需要用户输入任何东西。
+  expect(kinds).toEqual(["oauth", "oauth"])
   expect(hooks.auth.provider).toBe(PROVIDER)
   expect(hooks.auth.refreshLead).toBeGreaterThan(0)
+})
+
+test("the desktop method opens no page and needs no typing", async () => {
+  const hooks = await plugin({})
+  const m = hooks.auth.methods[1]
+  expect(m.label).toContain("导入")
+  const started = await m.authorize()
+  // url 为空 = magpie 不弹浏览器；有 callback 才能拿到结果
+  expect(started.url).toBe("")
+  expect(typeof started.callback).toBe("function")
+  expect(started.method).toBe("auto")
+})
+
+test("the desktop method reports a failure instead of throwing", async () => {
+  const hooks = await plugin({})
+  // 本机没有桌面端登录信息时，authorize 仍要正常返回，由 callback 报错
+  const started = await hooks.auth.methods[1].authorize()
+  const done = await started.callback()
+  expect(typeof done).toBe("object")
+  expect(["success", "failed"]).toContain(done.type)
+})
+
+test("refresh never touches a desktop sign-in", async () => {
+  const hooks = await plugin({})
+  const desktop = { type: "oauth", source: "desktop", access: "", refresh: "", expires: 0 }
+  expect(await hooks.auth.refresh(desktop)).toEqual({})
 })
 
 test("models() falls back to the declared list when not signed in", async () => {
   const hooks = await plugin({})
   const provider = { id: PROVIDER, models: { a: { id: "a" } } }
   expect(await hooks.provider.models(provider, { auth: undefined })).toEqual(provider.models)
+})
+
+test("a desktop sign-in whose store vanished reports a lapsed account", async () => {
+  const hooks = await plugin({})
+  const provider = { id: PROVIDER, models: { a: { id: "a" } } }
+  // source:desktop 的账号不存 token，读不到库就是账号失效。
+  // 本机可能真的装了 LobsterAI，所以把 APPDATA 指到不存在的目录，
+  // 让这条断言不依赖跑测试的机器。
+  const was = process.env.APPDATA
+  process.env.APPDATA = join(tmpdir(), "lobster-absent-store")
+  try {
+    let caught = null
+    try {
+      await hooks.provider.models(provider, { auth: { type: "oauth", source: "desktop" } })
+    } catch (e) { caught = e }
+    expect(caught?.signIn).toBe("expired")
+  } finally {
+    if (was === undefined) delete process.env.APPDATA
+    else process.env.APPDATA = was
+  }
 })
 ```
 
@@ -1881,7 +2080,7 @@ import { PROVIDER, NAME, API, CHAT_BASE, NPM, FALLBACK_MODELS } from "./lib/cons
 import { makeFetch } from "./lib/proxy.mjs"
 import { modelsFromCatalog, profileOfFrom } from "./lib/models.mjs"
 import { usageFrom } from "./lib/usage.mjs"
-import { importAuth } from "./lib/auth-import.mjs"
+import { desktopSignIn, desktopToken } from "./lib/auth-import.mjs"
 import { beginSignIn } from "./lib/auth-login.mjs"
 import { jwtExp } from "./lib/jwt.mjs"
 
@@ -1905,7 +2104,14 @@ async function apiGet(path, token, timeout = 20_000) {
   return v.data
 }
 
-const tokenOf = (auth) => (auth?.type === "oauth" ? auth.access : auth?.key)
+// 取这次请求要用的 token。
+// 桌面端导入的账号自己不存 token（见 Task 9），每次现读 ——
+// 桌面端续期后插件自动跟上。读不到就抛 signIn:"expired"。
+async function tokenOf(auth) {
+  if (!auth) return ""
+  if (auth.source === "desktop") return desktopToken()
+  return auth.type === "oauth" ? (auth.access ?? "") : (auth.key ?? "")
+}
 
 export const LobsterAuthPlugin = async () => ({
   config: async (cfg) => {
@@ -1938,23 +2144,33 @@ export const LobsterAuthPlugin = async () => ({
         },
       },
       {
-        type: "api",
+        // 必须是 oauth：api 类型会让 magpie 强制从 stdin 读一个 key，
+        // 而这条路根本不需要用户输入任何东西（见设计文档 §4.3）。
+        type: "oauth",
         label: "从本机 LobsterAI 导入登录",
-        placeholder: "留空即可，插件会读取本机的登录信息",
         async authorize() {
-          try {
-            return importAuth()
-          } catch (e) {
-            return { type: "failed", error: e.message }
+          // url 留空：magpie 不打开任何页面，直接走 callback
+          return {
+            url: "",
+            instructions: "直接使用本机 LobsterAI 桌面端已登录的账号。",
+            method: "auto",
+            async callback() {
+              try {
+                return desktopSignIn()
+              } catch (e) {
+                return { type: "failed", error: e.message }
+              }
+            },
           }
         },
       },
     ],
 
-    // 只对路径 A（oauth，有 expires）的账号生效。路径 B 存成 api 账号，
-    // 没有 expires，magpie 不会调用这里，桌面端的会话因此不会被搅动。
+    // 只对路径 A（浏览器登录，有 refresh 和 expires）生效。
+    // 路径 B（桌面端导入）的 refresh 是空串、expires 为 0，
+    // magpie 不会调用这里，桌面端的会话因此不会被搅动。
     async refresh(auth) {
-      if (auth?.type !== "oauth" || !auth.refresh) return {}
+      if (auth?.type !== "oauth" || auth.source === "desktop" || !auth.refresh) return {}
       const res = await fetch(`${API}/auth/refresh`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1978,7 +2194,10 @@ export const LobsterAuthPlugin = async () => ({
 
     async loader(getAuth) {
       const auth = await getAuth()
-      const token = tokenOf(auth)
+      // 这里只是给 magpie 一个「看起来已登录」的信号；真正的 token
+      // 由下面的 fetch 每次请求现取（桌面端账号尤其需要）。
+      let token = ""
+      try { token = await tokenOf(auth) } catch { return {} }
       if (!token) return {}
       return {
         baseURL: CHAT_BASE,
@@ -1986,6 +2205,7 @@ export const LobsterAuthPlugin = async () => ({
         headers: {},
         fetch: makeFetch({
           getAuth,
+          tokenOf,
           profileOf: (id) => profiles.get(String(id)),
           call: (input, init) => fetch(input, init),
         }),
@@ -1994,7 +2214,10 @@ export const LobsterAuthPlugin = async () => ({
 
     async usage(getAuth) {
       const auth = await getAuth()
-      const token = tokenOf(auth)
+      let token = ""
+      try { token = await tokenOf(auth) } catch (e) {
+        return { error: e.message, windows: [], signIn: e.signIn === "expired" ? "expired" : "kept" }
+      }
       if (!token) return { error: "尚未登录", windows: [] }
       try {
         const [quota, profile] = await Promise.all([
@@ -2018,7 +2241,11 @@ export const LobsterAuthPlugin = async () => ({
   provider: {
     id: PROVIDER,
     async models(provider, { auth } = {}) {
-      const token = tokenOf(auth)
+      let token = ""
+      try { token = await tokenOf(auth) } catch (e) {
+        if (e.signIn === "expired") throw e
+        return provider.models
+      }
       if (!token) return provider.models
       try {
         const list = await apiGet(
@@ -2064,12 +2291,26 @@ LobsterAI（有道龙虾）账号里的模型。
    登录成功后浏览器跳回本地，插件用授权码换取 token。存成 OAuth 账号，
    magpie 会在过期前自动续期。
 2. **从本机 LobsterAI 导入** —— 只读读取 LobsterAI 桌面端的登录信息
-   （Windows `%APPDATA%\LobsterAI\lobsterai.sqlite`）。存成 API key 账号，
-   **没有过期时间，因此 magpie 不会续期**，桌面端的会话不受影响。
+   （Windows `%APPDATA%\LobsterAI\lobsterai.sqlite`）。**不弹浏览器、不需要
+   输入任何东西**，直接使用桌面端当前登录的账号。
    这种方式需要先在本机安装并登录 LobsterAI 桌面端。
 
 两种方式用同一个账号标识（有道账号的 `yid`），因此用第二种登录后，
 再用第一种登录同一账号会原地替换它。
+
+### 为什么导入这条路不保存 token
+
+导入方式**一个字节的凭据都不存**（`access`、`refresh` 都是空串，`expires` 为 0），
+只在每次请求时现读桌面端的库：
+
+- 抄一份 `refreshToken` 会让桌面端和插件共用同一个 token，**谁先续期谁就把
+  对方踢下线**。留空则双方互不干扰。
+- `expires` 为 0，magpie 因此永不续期（它只在 `expires` 非零时才调用
+  `auth.refresh`），桌面端的会话不会被搅动。
+- 现读的好处是桌面端续期后，插件下一次请求自动用上新 token，不必重新登录。
+
+代价是：如果桌面端退出登录、卸载或库文件不可读，这个账号会立刻失效并提示
+重新登录 —— 这比用一个已经悄悄失效的旧 token 更诚实。
 
 ## 模型
 
@@ -2079,11 +2320,13 @@ LobsterAI（有道龙虾）账号里的模型。
 
 ## 说明
 
-- 思考档位通过 LobsterAI 的私有字段 `lobsterai_options` 传给上游。
+- 思考档位通过 LobsterAI 的私有字段 `lobsterai_options` 传给上游；**只对
+  有档位表的模型下发**，其余模型不下发（下发会被上游拒绝），它们照常思考。
 - 上游始终以 SSE 作答（即使请求写了 `stream:false`），插件会为非流式
   请求重组；上游把错误放在 SSE 里且状态码仍为 200，插件会还原成真正的
   非 2xx，以便 magpie 故障切换。
-- 本插件不会主动调用 LobsterAI 的续期接口去验证或刷新「导入」来的 token。
+- 本插件不会主动调用 LobsterAI 的续期接口去验证或刷新「导入」来的 token；
+  续期只发生在浏览器登录的账号上，由 magpie 在过期前触发。
 ```
 
 - [ ] **Step 6: 沙箱冒烟测试**
@@ -2144,7 +2387,7 @@ git commit -m "feat: 装配钩子、README 与沙箱验证"
 | §3 文件布局 | 全部任务 |
 | §4.1 浏览器登录 | Task 10 |
 | §4.2 从本机导入 | Task 9 |
-| §4.3 续期策略 | Task 11（`refresh` 只处理 oauth；api 账号无 `expires`） |
+| §4.3 续期策略 | Task 11（`refresh` 只处理浏览器登录的 oauth 账号；桌面端导入的账号 `expires` 为 0 故不会被续期） |
 | §5.1 模型发现 | Task 7 |
 | §5.1 variants 通道 | Task 5（`variantsOf`）、Task 6（`applyThinking`） |
 | §5.2 用量 | Task 8 |
@@ -2166,8 +2409,22 @@ git commit -m "feat: 装配钩子、README 与沙箱验证"
 
 - `profile`（思考档位表）在 Task 5 定义为 `{options:[{level,openclawLevel}], defaultLevel}`，Task 7 的 `profileOfFrom` 原样透传 `entry.thinkingConfig`，Task 11 存入 `profiles` Map，Task 6 通过 `profileOf(model)` 读取 —— 命名一致。
 - `variantsOf`（Task 5）返回 `{[level]: {lobsterai_thinking: level}}`，Task 7 的 `runtimeModel` 调用它，Task 6 的 `applyThinking` 读同一个 `MARKER` 常量 —— 一致。
-- `makeFetch({getAuth, profileOf, call})`（Task 6）与 Task 11 的调用点参数名一致。
+- `makeFetch({getAuth, tokenOf, profileOf, call})`（Task 6）与 Task 11 的调用点参数名一致；`tokenOf` 由调用方注入，因为桌面端导入的账号不存 token（见 Task 9）。
 - `errorOf`/`statusFor` 只在 Task 6 使用，命名一致。
 - `_internal` 在 Task 1 与 Task 11 都导出，Task 11 的版本是最终版。
 
-`signIn`（Task 10）返回 `accountId`；Task 9 的 `importAuth` 返回 `metadata.accountId` —— 两者同域（都是有道 `yid`），因此同一账号下后一次登录会替换前一次。`expires` 在 Task 9 放在 `metadata` 里、在 Task 10 放在顶层：这是有意的，Task 10 走 `oauth` 账号（magpie 读顶层 `expires` 决定续期），Task 9 走 `api` 账号（magpie 不读 `expires`，放 `metadata` 仅供展示）。
+`signIn`（Task 10）与 `desktopSignIn`（Task 9）都返回顶层 `accountId`（有道 `yid`），因此同一账号下后一次登录会原地替换前一次。
+
+两条登录路径**都是 `oauth` 账号**，靠 `source` 与 `expires` 区分续期行为：
+
+| | 浏览器登录 | 从本机 LobsterAI 导入 |
+|---|---|---|
+| `access` / `refresh` | 真 token | 都是 `""`（不存凭据） |
+| `expires` | 真到期时间 | `0` |
+| `source` | 无 | `"desktop"` |
+| magpie 是否续期 | 是（`expires` 非零 + `refresh` 非空） | **否**（`expires` 为 0，magpie 只在非零时才调 `auth.refresh`） |
+| token 来源 | 账号里的 `access` | 每次请求现读桌面端 sqlite |
+
+导入这条路刻意**不保存 token**：抄一份 `refreshToken` 会让桌面端和插件共用同一个凭据，谁先续期谁就把对方踢下线。留空 + 现读则双方互不干扰，且桌面端续期后插件自动跟上。代价是桌面端退出登录后该账号立刻失效并提示重新登录 —— 这比继续用一个已悄悄失效的旧 token 更诚实。
+
+`makeFetch` 因此接收注入的 `tokenOf(auth)`（Task 6），而不是自己写死「oauth 读 `access`、api 读 `key`」—— 桌面端账号的 `access` 是空的，写死就会解析出空 token。`desktopToken()` 抛 `{signIn:"expired"}`，`makeFetch` 把它转成带失效标记的 401。
