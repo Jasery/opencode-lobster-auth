@@ -26,7 +26,7 @@ test("maps a catalog entry to a magpie model", () => {
 
 test("thinking options become variants keyed by level", () => {
   expect(runtimeModel(ENTRY, {}).variants).toEqual({
-    off: { lobsterai_thinking: "off" },
+    none: { lobsterai_thinking: "off" },
     high: { lobsterai_thinking: "high" },
     max: { lobsterai_thinking: "max" },
   })

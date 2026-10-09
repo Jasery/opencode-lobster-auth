@@ -40,7 +40,13 @@ LobsterAI（有道龙虾）账号里的模型。
 
 ## 说明
 
-- 思考档位通过 LobsterAI 的私有字段 `lobsterai_options` 传给上游。
+- 思考档位由上游的 `thinkingConfig` 决定每个模型支持哪些，实测都是
+  `关 / high / max` 三档。对 magpie 暴露时必须用**它那条档位阶梯里的名字**：
+  magpie 会把入参 `reasoning_effort` 映射到「模型声明过的档位名」再下发，
+  声明里用了阶梯外的名字，那一档就永远选不中。LobsterAI 管最低档叫 `off`，
+  而 `off` 不在 magpie 的阶梯里，所以对外叫 `none` —— 插件收到 `none` 后
+  再换回上游的 `off`。
+- 档位通过 LobsterAI 的私有字段 `lobsterai_options` 传给上游。
   只有自带档位表的模型才会带上这个字段 —— 对其它模型带上它会被上游直接
   拒答（`model does not have a valid thinkingConfig`）。
 - 上游始终以 SSE 作答（即使请求写了 `stream:false`），插件会为非流式

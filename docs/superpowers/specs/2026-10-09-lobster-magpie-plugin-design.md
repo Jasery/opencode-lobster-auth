@@ -214,23 +214,24 @@ magpie 的官方文档确认了本策略所依赖的机制：
 
 `config` 钩子同时声明一份静态兜底模型表（`lib/constants.mjs`），供未登录状态显示。
 
-#### variants 是档位的传递通道
+#### variants：只有键名有用，而且必须是 magpie 阶梯里的名字
 
-从已安装的社区插件（`opencode-qoder-auth`、`opencode-workbuddy-auth`）确认了 `variants` 的确切语义：**它的键是档位名，值对象会被合并进请求体**。qoder 就是这么把档位传给上游的：
+原先从社区插件推断的「值对象会被合并进请求体」是**错的**。用一次性探针插件把 `loader.fetch` 收到的 `init.body` 落盘后，实际语义是：
 
-```js
-variants: Object.fromEntries(m.efforts.map((e) => [e, { reasoningEffort: e }]))
-```
+- **值对象永远不会到达插件。** magpie 的 plugin-host 汇总模型时写的是 `Object.keys(m.variants ?? {})`，落盘（`plugin-providers.json`）也是 `"variants":["none","high","max"]` 这样的名字数组。Go 侧从一开始就没有过值对象，所以**不存在「把值合并进请求体」这回事** —— qoder 等社区插件的值对象同样到不了。
+- **键名才是通道。** magpie 维护一条自己的档位阶梯（`none/minimal/low/medium/high/xhigh/max`），把入参 `reasoning_effort` 映射到「模型声明过的那个档位名」，再以 `reasoning_effort: <该名字>` 放进交给插件的 body。阶梯外的入参（`off` / `disabled` / `enabled` / `adaptive` / 空串）被直接丢弃。自定义字段一律不进 body；`model`/`messages`/`stream`/`temperature`/`max_tokens` 等标准字段保留。
 
-LobsterAI 的档位名与上游 `level` 取值同域（`off|high|max` 等），因此直接以 `level` 为键，并在值里放一个插件自读的标记：
+实测映射（探针模型声明 `none/high/max`）：`none`→`none`，`minimal`/`low`/`medium`/`high`→`high`，`xhigh`/`max`→`max`。
+
+**推论：档位名必须落在 magpie 的阶梯里。** LobsterAI 管最低档叫 `off`，这个名字不在阶梯里，于是那一档永远选不中 —— 声明 `off/high/max` 时发 `none` 会被钳到 `high`（这正是修复前的行为）。因此对外用 `none`，写给上游时再换回来：
 
 ```js
 variants: Object.fromEntries(
-  profile.options.map((o) => [o.level, { lobsterai_thinking: o.level }])
+  profile.options.map((o) => [o.level === "off" ? "none" : o.level, { lobsterai_thinking: o.level }])
 )
 ```
 
-`lib/proxy.mjs` 读取该标记（或退而读取 `reasoning_effort` / `reasoningEffort` / `thinking.level`），删掉标记字段，再按 §6 坑 3 写入 `lobsterai_options`。这样档位走的是 magpie 的标准通道，不依赖上游认识 `reasoning_effort`。
+`lib/proxy.mjs` 读取 `reasoning_effort`（以及 `reasoningEffort` / `thinking.level` / 插件自己的标记），把 `none` 换回 `off`，再按 §6 坑 3 写入 `lobsterai_options`。**只有翻译成功时才删掉 `reasoning_effort`** —— 上游自己就认这个字段，没翻译成功时删掉等于白扔一个本来能用的控制。
 
 ### 5.2 用量
 
@@ -342,11 +343,11 @@ variants: Object.fromEntries(
 
 ### 仍待收敛（防御式实现，实测后收窄）
 
-1. `variants` 的标记字段能否原样到达 `fetch` —— 已从社区插件确认 variants 的值对象会合并进请求体，但仍需实测 magpie 是否保留插件自定义的标记键；不行就退回读取 `reasoning_effort`。
-2. 上游对非流式请求是否真的从不返回 JSON —— 若某模型返回 JSON 则直通，不做重组。
-3. 真实的限流响应长什么样（`code` 与文案）—— 未观察到，暂按关键词判断，见 §6 坑 2。
-4. `limit.output` 的真实上限 —— 接口未提供，先用 32000 的保守值，实测后按模型校准。
-5. `variants` 的键名能否驱动 magpie 传出对应档位 —— 与第 1 点同源，一起收敛。
+1. ~~`variants` 的标记字段能否原样到达 `fetch`~~ —— **已收敛**：值对象根本到不了插件，magpie 下发的是它阶梯里的档位名，见 §5.1。修复后真机实测（`lobster/deepseek-flash`，各两遍）：`none` 令 `reasoning_content` 精确为 0 字节且正文非空，`high` / `max` / 不指定均大于 0。
+2. 上游对非流式请求是否真的从不返回 JSON —— 若某模型返回 JSON 则直通，不做重组。**已收敛**：实测 10 次调用（含错误）全部是 HTTP 200 + `text/event-stream`；由插件重组成 JSON 交给调用方。
+3. 真实的限流响应长什么样（`code` 与文案）—— 未观察到，暂按关键词判断，见 §6 坑 2。**未收敛**。
+4. `limit.output` 的真实上限 —— 接口未提供（模型目录 18 个字段里没有任何输出上限），先用 32000 的保守值。**部分收敛**：实测 `max_tokens` 在 262144 时通过、524288 时 HTTP 500「服务器内部错误」，故真实上限介于两者之间；32000 是安全的保守值。注意 magpie 的 `/v1/models` 只是把这个数字回显成 `max_output_tokens`，无法自证。
+5. ~~`variants` 的键名能否驱动 magpie 传出对应档位~~ —— **已收敛**（与第 1 点同源）：键名必须落在 magpie 的档位阶梯内，否则该档选不中，见 §5.1。
 
 ## 9. 风险
 

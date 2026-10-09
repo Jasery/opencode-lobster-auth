@@ -112,6 +112,64 @@ test("a model without a thinking profile gets no lobsterai_options", async () =>
   expect("lobsterai_options" in seen).toBe(false)
 })
 
+// deepseek-flash 的 thinkingConfig（实测）。注意 max 的 openclawLevel 是 xhigh。
+const DS_PROFILE = {
+  options: [
+    { level: "off", openclawLevel: "off" },
+    { level: "high", openclawLevel: "high" },
+    { level: "max", openclawLevel: "xhigh" },
+  ],
+  defaultLevel: "high",
+}
+
+const okStream = () => sseResponse([
+  'data: {"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
+  "data: [DONE]\n\n",
+])
+
+async function bodySeenFor(body, profile) {
+  let seen = null
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
+    profileOf: () => profile,
+    call: async (url, init) => { seen = JSON.parse(init.body); return okStream() },
+  })
+  await f("https://up/v1/chat/completions", { method: "POST", body: JSON.stringify(body) })
+  return seen
+}
+
+// 端到端锁：magpie 下发的是它自己阶梯里的 "none"，插件必须换成上游的 "off"。
+// 这条曾经是坏的 —— 变体名用了 "off"，magpie 够不着，最低档永远传不过来。
+test("magpie's none reaches the wire as off", async () => {
+  const seen = await bodySeenFor(
+    { model: "deepseek-flash", stream: false, messages: [], reasoning_effort: "none" },
+    DS_PROFILE,
+  )
+  expect(seen.lobsterai_options).toEqual({ version: 1, thinking: { level: "off" } })
+  // 上游不认识 "none"，翻译完就不要再把 magpie 的叫法透传下去
+  expect(seen.reasoning_effort).toBeUndefined()
+})
+
+test("magpie's xhigh still maps to the model's max", async () => {
+  const seen = await bodySeenFor(
+    { model: "deepseek-flash", stream: false, messages: [], reasoning_effort: "xhigh" },
+    DS_PROFILE,
+  )
+  expect(seen.lobsterai_options).toEqual({ version: 1, thinking: { level: "max" } })
+})
+
+// 没翻译成功时不能把 magpie 下发的档位名删掉：上游自己就认 reasoning_effort，
+// 删掉等于白扔一个本来能用的控制。
+test("a model with no thinking profile keeps reasoning_effort", async () => {
+  const seen = await bodySeenFor(
+    { model: "qwen3.8-flash", stream: false, messages: [], reasoning_effort: "high" },
+    undefined,
+  )
+  expect("lobsterai_options" in seen).toBe(false)
+  expect(seen.reasoning_effort).toBe("high")
+})
+
 // 桌面端导入的账号不存 token，每次现读；读不到就是账号失效。
 // 这里不能让请求带着空 token 发出去 —— 那会被上游当成匿名请求。
 test("a resolver that cannot read the token reports a lapsed account", async () => {

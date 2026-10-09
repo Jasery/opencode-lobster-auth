@@ -7,12 +7,23 @@ const PROFILE = {
   defaultLevel: "max",
 }
 
-test("variants are keyed by level and carry a plugin marker", () => {
+// magpie 的档位阶梯里没有 "off"：声明成 off 的那一档永远选不中
+// （实测：发 off 被丢弃，发 none 才送得到）。对外叫 none，写给上游时换回 off。
+test("variants expose the lowest level as none, not off", () => {
   expect(variantsOf(PROFILE)).toEqual({
-    off: { lobsterai_thinking: "off" },
+    none: { lobsterai_thinking: "off" },
     high: { lobsterai_thinking: "high" },
     max: { lobsterai_thinking: "max" },
   })
+})
+
+test("variants never advertise a level magpie cannot reach", () => {
+  expect(Object.keys(variantsOf(PROFILE))).not.toContain("off")
+})
+
+// magpie 下发的是它自己阶梯里的名字，插件必须换回上游的叫法
+test("levelOf maps magpie's none back to off", () => {
+  expect(levelOf({ reasoning_effort: "none" }, PROFILE)).toBe("off")
 })
 
 test("levelOf prefers the plugin marker", () => {
@@ -62,6 +73,14 @@ test("applyThinking still drops the marker when it writes nothing", () => {
   applyThinking(req, undefined)
   expect("lobsterai_thinking" in req).toBe(false)
   expect("lobsterai_options" in req).toBe(false)
+})
+
+// 调用方靠这个返回值决定要不要删掉 magpie 下发的 reasoning_effort：
+// 没翻译成功时得留着，上游自己认那个字段。
+test("applyThinking reports whether it wrote the protocol field", () => {
+  expect(applyThinking({ model: "m", messages: [] }, PROFILE)).toBe(true)
+  expect(applyThinking({ model: "qwen3.8-flash", messages: [] }, undefined)).toBe(false)
+  expect(applyThinking({ model: "kimi-k2.6", messages: [] }, { options: [] })).toBe(false)
 })
 
 test("isKimiK3 matches the family but not unrelated ids", () => {
