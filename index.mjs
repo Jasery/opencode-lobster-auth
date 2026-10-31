@@ -3,7 +3,7 @@ import { makeFetch } from "./lib/proxy.mjs"
 import { modelsFromCatalog, profileOfFrom } from "./lib/models.mjs"
 import { usageFrom } from "./lib/usage.mjs"
 import { desktopSignIn, desktopToken } from "./lib/auth-import.mjs"
-import { beginSignIn } from "./lib/auth-login.mjs"
+import { beginSignIn, beginSignInAnnounced } from "./lib/auth-login.mjs"
 import { jwtExp } from "./lib/jwt.mjs"
 
 const REFRESH_LEAD = 6 * 3600 * 1000
@@ -60,6 +60,25 @@ export const LobsterAuthPlugin = async () => ({
           return {
             url: pending.url,
             instructions: "在浏览器里用有道账号登录，完成后回到这里。",
+            method: "auto",
+            callback: () => pending.finish(),
+          }
+        },
+      },
+      {
+        // 浏览器在另一台机器上（magpie 跑在 NAS / Docker 里，用这台电脑的
+        // 浏览器打开它的页面）：回调落在浏览器的 127.0.0.1，到不了 magpie。
+        // 登录地址在普通 query 里写明了本机回调端口，magpie 因此会为这次
+        // 登录显示「回调 URL」输入框；把登录后地址栏里的完整地址粘进去，
+        // magpie 在本机把请求送到插件正在监听的端口，回调照常抵达，
+        // 剩下的与「浏览器登录」完全一样。
+        type: "oauth",
+        label: "远程浏览器登录",
+        async authorize() {
+          const pending = await beginSignInAnnounced()
+          return {
+            url: pending.url,
+            instructions: "在浏览器里用有道账号登录。登录后浏览器会跳到 127.0.0.1 并提示无法访问，这是预期现象：复制此时地址栏的完整地址，粘贴到下面的「回调 URL」，再点「完成登录」。请在 5 分钟内完成；回调地址包含一次性授权信息，不要发给别人。",
             method: "auto",
             callback: () => pending.finish(),
           }
