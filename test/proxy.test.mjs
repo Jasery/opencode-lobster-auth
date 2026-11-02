@@ -10,6 +10,79 @@ test("errorOf tolerates junk", () => {
   expect(errorOf("nope")).toEqual({ code: 0, message: "" })
 })
 
+// 形态 B 把 message 直接写成字符串（实测 {error:{...}} 是对象，但上游两种都发得出）
+test("errorOf reads an error that is just a string", () => {
+  expect(errorOf('{"error":"上游炸了"}')).toEqual({ code: 0, message: "上游炸了" })
+})
+
+// 上游的错误有两种帧形态（2026-11-02 实测）：
+//   A. event:error + data:{...}          代理层错误（4000 / 40301）
+//   B. data:{"error":{...}}，没有 event 行  上游透传错误（50204：temperature 等）
+// 只认 A 会把 B 当成正常流读完，吐出一个 200 空回复。
+const UPSTREAM_ERR = 'data: {"error":{"message":"invalid temperature: only 1 is allowed for this model","type":"upstream_error","code":50204}}\n\n'
+
+test("a form-B error frame becomes a real 400 for a non-streaming caller", async () => {
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
+    profileOf: () => undefined,
+    call: async () => sseResponse([UPSTREAM_ERR, "data: [DONE]\n\n"]),
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST", body: JSON.stringify({ model: "kimi-k2.8-preview", stream: false, messages: [], temperature: 0.7 }),
+  })
+  expect(res.status).toBe(400)
+  // 原始报错必须留在 message 里，不能被吞成「空回复」
+  expect((await res.json()).error.message).toContain("invalid temperature")
+})
+
+test("a form-B error frame becomes a real 400 for a streaming caller", async () => {
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
+    profileOf: () => undefined,
+    call: async () => sseResponse([UPSTREAM_ERR, "data: [DONE]\n\n"]),
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST", body: JSON.stringify({ model: "kimi-k2.8-preview", stream: true, messages: [], temperature: 0.7 }),
+  })
+  expect(res.status).toBe(400)
+  expect((await res.json()).error.message).toContain("invalid temperature")
+})
+
+// 反向保护：正常 chunk 一定带 choices，不能被误判成错误帧
+test("a chunk that carries both choices and an error field is not an error frame", async () => {
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
+    profileOf: () => undefined,
+    call: async () => sseResponse([
+      'data: {"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}],"error":null}\n\n',
+      "data: [DONE]\n\n",
+    ]),
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST", body: JSON.stringify({ model: "m", stream: false, messages: [] }),
+  })
+  expect(res.status).toBe(200)
+  expect((await res.json()).choices[0].message.content).toBe("hi")
+})
+
+// 形态 A 的 data 不保证是 JSON，event 行的判断必须保留
+test("an event:error whose data is not JSON is still an error", async () => {
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
+    profileOf: () => undefined,
+    call: async () => sseResponse(['event: error\ndata: gateway blew up\n\n']),
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST", body: JSON.stringify({ model: "m", stream: true, messages: [] }),
+  })
+  expect(res.status).toBe(400)
+  expect((await res.json()).error.message).toContain("LobsterAI")
+})
+
 test("statusFor maps the observed codes", () => {
   expect(statusFor(40100, "登录已过期，请重新登录")).toBe(401)
   expect(statusFor(40300, "不支持的模型: x")).toBe(403)
