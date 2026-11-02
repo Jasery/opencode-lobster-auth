@@ -29,20 +29,41 @@ test("config declares the provider when absent", async () => {
   expect(Object.keys(cfg.provider[PROVIDER].models).length).toBeGreaterThan(0)
 })
 
-test("both sign-in methods are offered", async () => {
+// byLabel 按按钮上的名字找方法：顺序会变（远程那条插在中间），下标不可靠。
+const byLabel = (hooks, word) => hooks.auth.methods.find((m) => m.label.includes(word))
+
+test("every sign-in method is offered", async () => {
   const hooks = await plugin({})
   const kinds = hooks.auth.methods.map((m) => m.type)
-  // 两条都必须是 oauth：api 类型会逼 magpie 从 stdin 读一个 key，
-  // 而「导入本机登录」这条路不需要用户输入任何东西。
-  expect(kinds).toEqual(["oauth", "oauth"])
+  // 全是 oauth：api 类型会逼 magpie 从 stdin 读一个 key，
+  // 而这些路都不需要用户输入任何东西。
+  expect(kinds.every((k) => k === "oauth")).toBe(true)
+  expect(hooks.auth.methods.map((m) => m.label)).toEqual([
+    "浏览器登录（有道账号）", "远程浏览器登录", "从本机 LobsterAI 导入登录",
+  ])
   expect(hooks.auth.provider).toBe(PROVIDER)
   expect(hooks.auth.refreshLead).toBeGreaterThan(0)
 })
 
+test("the remote method names its callback port where magpie looks", async () => {
+  const hooks = await plugin({})
+  const started = await byLabel(hooks, "远程").authorize()
+  const u = new URL(started.url)
+  // magpie 只从普通 query 找 loopback 端口（loopbackPorts），找到才给
+  // 「回调 URL」输入框；只写在 hash 里它看不见。这条断言就是那次约定。
+  const plain = u.searchParams.get("redirect_uri")
+  expect(plain).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/auth\/callback$/)
+  // portal 要的那份仍在 hash 里，且与普通 query 指向同一地址
+  const hash = new URLSearchParams(u.hash.slice(u.hash.indexOf("?") + 1))
+  expect(hash.get("redirect_uri")).toBe(plain)
+  expect(hash.get("source")).toBe("electron")
+  expect(started.method).toBe("auto")
+  expect(typeof started.callback).toBe("function")
+})
+
 test("the desktop method opens no page and needs no typing", async () => {
   const hooks = await plugin({})
-  const m = hooks.auth.methods[1]
-  expect(m.label).toContain("导入")
+  const m = byLabel(hooks, "导入")
   const started = await m.authorize()
   // url 为空 = magpie 不弹浏览器；有 callback 才能拿到结果
   expect(started.url).toBe("")
@@ -53,7 +74,7 @@ test("the desktop method opens no page and needs no typing", async () => {
 test("the desktop method reports a failure instead of throwing", async () => {
   const hooks = await plugin({})
   // 本机没有桌面端登录信息时，authorize 仍要正常返回，由 callback 报错
-  const started = await hooks.auth.methods[1].authorize()
+  const started = await byLabel(hooks, "导入").authorize()
   const done = await started.callback()
   expect(typeof done).toBe("object")
   expect(["success", "failed"]).toContain(done.type)

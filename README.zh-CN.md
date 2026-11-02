@@ -25,6 +25,11 @@ magpie plugin login lobster
   magpie 打开有道登录页。浏览器带着授权码跳回来，插件拿它在
   `/api/auth/exchange` 换取 token。存成一个 `oauth` 账号，带 access 与
   refresh token 及到期时间，因此 magpie 会为它续期。
+- **远程浏览器登录。** 给 magpie 跑在服务器上、Docker 里，或者浏览器在另一台
+  机器上的情况：回调落在浏览器自己的 `127.0.0.1`，到不了 magpie。登录页的普通
+  query 里写明了回调端口，因此 magpie 会给出「回调 URL」输入框：登录后复制浏览器
+  停在的那个完整地址，粘贴进去，magpie 会在本机把它送到插件监听的端口。其余与
+  浏览器登录完全一样。
 - **从桌面端导入。** 使用 LobsterAI 桌面端当前登录的账号。**不打开任何页面，
   不需要输入任何东西。** 只读桌面端的 SQLite 库，绝不写入：
   - Windows：`%APPDATA%\LobsterAI\lobsterai.sqlite`

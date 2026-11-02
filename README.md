@@ -27,6 +27,12 @@ first way replaces it in place.
   with a code, which is traded for tokens at `/api/auth/exchange`. Kept as
   an `oauth` sign-in holding the access and refresh tokens and their expiry,
   so magpie renews it.
+- **Remote browser.** For magpie on a server, in Docker, or anywhere the
+  browser is on another machine: the callback lands on the browser's own
+  `127.0.0.1` and never reaches magpie. The sign-in page's plain query names
+  the callback port, so magpie offers a **Callback URL** field: sign in, copy
+  the whole address the browser ends on, paste it there, and magpie sends it
+  to the port the plugin is listening on. The rest is the browser way.
 - **The desktop's sign-in.** Uses the account LobsterAI's own desktop app is
   signed in to. **No page is opened and nothing is typed.** The app's SQLite
   database is read, never written:
