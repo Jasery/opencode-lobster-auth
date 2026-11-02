@@ -42,6 +42,30 @@ test("levelOf falls back to the profile default", () => {
   expect(levelOf({}, PROFILE)).toBe("max")
 })
 
+test("a cached or direct level absent from the current profile uses its default", () => {
+  expect(levelOf({ reasoning_effort: "adaptive" }, PROFILE)).toBe("max")
+  expect(levelOf({ reasoning_effort: "medium" }, PROFILE)).toBe("max")
+})
+
+test("a profile without off or a valid default still picks an offered level", () => {
+  expect(levelOf({}, { options: [{ level: "high" }], defaultLevel: "off" })).toBe("high")
+})
+
+for (const model of ["kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"]) {
+  test(`tool-call history repair is independent of forced max: ${model}`, () => {
+    const req = { model, reasoning_effort: "low", messages: [
+      { role: "assistant", tool_calls: [{ id: "a" }] },
+      { role: "assistant", tool_calls: [{ id: "b" }], reasoning_content: "kept" },
+      { role: "assistant", content: "plain" },
+    ] }
+    applyKimi(req, model)
+    expect(req.reasoning_effort).toBe("low")
+    expect(req.messages[0].reasoning_content).toBe("")
+    expect(req.messages[1].reasoning_content).toBe("kept")
+    expect(req.messages[2].reasoning_content).toBeUndefined()
+  })
+}
+
 test("levelOf with no profile yields off", () => {
   expect(levelOf({}, undefined)).toBe("off")
 })

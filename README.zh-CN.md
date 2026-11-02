@@ -37,6 +37,7 @@ magpie plugin login lobster
   - Linux：`~/.config/LobsterAI/lobsterai.sqlite`
 
   库不存在，或者被桌面端加密存放，这条路会带着说明失败，改用浏览器登录即可。
+  导入身份会与当前 token 交叉核对；身份缺失或冲突时会拒绝使用，避免误用别的账号。
 
 两种方式都保存在 magpie 的 `plugin-auth.json`。
 
@@ -69,11 +70,12 @@ completions。LobsterAI 有三个习惯被处理掉了：
 
 - **所有回复都是 SSE**，即使请求里写了 `stream: false`。非流式调用方会拿到
   由它重组出的一个完整 `chat.completion`；流式调用方拿到的就是原样的事件。
-- **错误藏在 200 里。** LobsterAI 把错误放进流里（`event: error`），状态码
-  仍是 200 —— 这样调用方没有可故障切换的依据。插件读首条记录，还原成它真正
-  表示的状态：`40100` → 401，`40300` → 403，`42900` 或限流措辞 → 429，其余
-  → 400。被 LobsterAI 拒绝的登录是真 401，原样透传并带上 magpie 的失效标记，
-  账号因此会被标出来。
+- **错误藏在 200 里。** LobsterAI 把错误放进流里（`event: error` 或 JSON 错误帧），
+  状态码仍是 200 —— 这样调用方没有可故障切换的依据。插件检查开头的帧并保留
+  纯文本错误；非流式请求还会捕获首个回复分片之后出现的错误。它会还原成真正的
+  状态：`40100` → 401，`40300` → 403，`42900` 或限流措辞 → 429，其余 → 400。
+  流式请求开始输出后无法再改 HTTP 状态，因此中途错误事件会原样保留。被 LobsterAI
+  拒绝的登录是真 401，带上 magpie 的失效标记，账号因此会被标出来。
 - **请求带上桌面端的标识头**（`X-LobsterAI-Client-Version`、
   `X-LobsterAI-Client-Capabilities`）。LobsterAI 不强制要求，但它们标明了
   插件所说的特性集。
@@ -86,7 +88,8 @@ completions。LobsterAI 有三个习惯被处理掉了：
 `off`/`high`/`max`。它们走 LobsterAI 自己的字段：
 `{"lobsterai_options":{"version":1,"thinking":{"level":"off"}}}`。把该字段发给
 **没有**档位表的模型是硬错误（`code 4000`，*model does not have a valid
-thinkingConfig*），所以只在有档位表可映射时才写。
+thinkingConfig*），所以只在有档位表可映射时才写。有档位表时只声明当前 profile
+提供的档位；单独实测的 `reasoning_effort` 档位只用于尚无 profile 的模型。
 
 **10 个模型没有档位表**，但同样报 `supportsThinking: true`。对这些模型，插件
 声明档位、让 magpie 的 `reasoning_effort` 原样透传，LobsterAI 认这个字段。
@@ -117,10 +120,11 @@ thinkingConfig*），所以只在有档位表可映射时才写。
 都实测过。客户端只要带了非 1 的 `temperature`（多数 agent 都带），否则会被
 回一句 `50204 invalid temperature: only 1 is allowed`。
 
-`kimi-k3` 单独再加两条：`reasoning_effort` 固定为 `max`，缺少
-`reasoning_content` 的 assistant 工具调用补一个空串。这个「强制 max」
-**刻意没有**扩展到 `kimi-k3.1-pro`：后者实测认完整档位，强制 max 会把每一档
-都悄悄覆盖掉。
+只有 `kimi-k3` 本身将 `reasoning_effort` 固定为 `max`；这个规则**没有**扩展到
+`kimi-k3.1-pro`：后者实测认完整档位，强制 max 会把每一档都悄悄覆盖掉。
+工具历史补齐是另一条独立规则：保留对 `kimi-k3` 前缀家族（含 `kimi-k3.1-pro`）
+的兼容处理，缺少 `reasoning_content` 的 assistant 工具调用补空串，但不覆盖已有
+思考内容，也不改变用户选择的档位。
 
 `kimi-k3` 属于 LobsterAI「能用但某些版本目录里没列出」的模型。它保留在本插件
 为未登录账号声明的兜底表里，所以 `lobster/kimi-k3` 仍可选。
@@ -160,7 +164,8 @@ thinkingConfig*），所以只在有档位表可映射时才写。
 
 这是不开 LobsterAI 桌面端时唯一能领到这些积分的办法 —— 签到入口在桌面端侧栏。
 领取是幂等的：当天已领会回 `51104`，插件报 `done` 而不是重复领；每次领取都会
-重新读一次状态复核，通过了才报 `claimed`。
+重新读一次状态复核，通过了才报 `claimed`。HTTP 故障、损坏的业务响应或无效
+状态统一报 `failed`，不冒充“无活动”或“无资格”，让 magpie 可以当天稍后重试。
 
 ## 不做的事
 

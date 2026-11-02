@@ -97,14 +97,23 @@ test("a model that does not think gets no levels", () => {
   expect(m.variants).toEqual({})
 })
 
-// 两个来源可能同时存在：上游某天给某个模型补了 thinkingConfig，而它也在实测表里。
-// 这时不能静默丢掉实测档位（那等于把 6 档降成 3 档），要合并。
-test("measured levels survive a model that also gains a thinking profile", () => {
+// 有 profile 后请求走 lobsterai_options，旧 reasoning_effort 的测量不能直接合并。
+test("the current thinking profile overrides previously measured levels", () => {
   const both = runtimeModel({ ...NO_PROFILE, modelId: "kimi-k3.1-pro", thinkingConfig: ENTRY.thinkingConfig }, {})
-  const keys = Object.keys(both.variants)
-  // 实测的 6 档一个不少
-  for (const lv of ["none", "low", "medium", "high", "xhigh", "max"]) expect(keys).toContain(lv)
+  expect(both.variants).toEqual({
+    none: { lobsterai_thinking: "off" },
+    high: { lobsterai_thinking: "high" },
+    max: { lobsterai_thinking: "max" },
+  })
 })
+
+for (const thinkingConfig of [null, ENTRY.thinkingConfig]) {
+  test(`a measured model that no longer reasons declares no variants (profile=${!!thinkingConfig})`, () => {
+    const m = runtimeModel({ ...NO_PROFILE, supportsThinking: false, thinkingConfig })
+    expect(m.capabilities.reasoning).toBe(false)
+    expect(m.variants).toEqual({})
+  })
+}
 
 // 有档位表但不在实测表里的模型，仍然只用档位表（别凭空加档）
 test("a profile-only model keeps exactly its profile's levels", () => {

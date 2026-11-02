@@ -184,12 +184,99 @@ test("an account stored by its numeric id is recognised by its uid", () => {
 
 // yid 是数字时也要能比对：magpie 往返一轮后回来的是字符串
 test("a numeric yid still compares equal to the stored string", () => {
-  const { dir, env } = makeDesktop({ user: '{"yid":12345,"id":67097}' })
+  const tokens = `h.${b64({ sub: 67097, yid: 12345 })}.s`
+  const { dir, env } = makeDesktop({ tokens, user: '{"yid":12345,"id":67097}' })
   try {
     const signed = desktopSignIn(env)
     expect(typeof signed.accountId).toBe("string")
     expect(() => desktopToken(env, signed.accountId, signed.uid)).not.toThrow()
     expect(() => desktopToken(env, "99999", "1")).toThrow()
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+function updateDesktop(env, key, value) {
+  const db = new Database(dbPath(env))
+  try { db.run("UPDATE kv SET value=? WHERE key=?", [JSON.stringify(value), key]) }
+  finally { db.close() }
+}
+
+// 切换账号不是原子更新：用户行还属于 A，token 已经属于 B。
+test("a new token cannot borrow the old auth_user identity", () => {
+  const { dir, env } = makeDesktop()
+  try {
+    const signed = desktopSignIn(env)
+    const other = `h.${b64({ sub: 99001, yid: "other@example.test" })}.s`
+    updateDesktop(env, "auth_tokens", { accessToken: other })
+    expect(() => desktopToken(env, signed.accountId, signed.uid)).toThrow()
+    expect(() => desktopToken(env)).toThrow() // 老账号也不能放过冲突快照
+    expect(() => desktopSignIn(env)).toThrow()
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+for (const user of [
+  { yid: "other@example.test", id: 67097 }, // id 匹配不能掩盖 yid 冲突
+  { yid: "urs-phoneyd.abc@163.com", id: 99001 }, // 反过来也一样
+]) {
+  test(`a conflicting identity field fails closed: ${JSON.stringify(user)}`, () => {
+    const { dir, env } = makeDesktop()
+    try {
+      const signed = desktopSignIn(env)
+      updateDesktop(env, "auth_user", user)
+      let caught
+      try { desktopToken(env, signed.accountId, signed.uid) } catch (e) { caught = e }
+      expect(caught?.signIn).toBe("expired")
+      expect(() => desktopSignIn(env)).toThrow()
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+}
+
+test("a token without identity cannot borrow it from auth_user", () => {
+  const tokens = `h.${b64({ typ: "Bearer" })}.s`
+  const { dir, env } = makeDesktop({ tokens })
+  try {
+    expect(() => desktopToken(env, "urs-phoneyd.abc@163.com", "67097")).toThrow()
+    expect(() => desktopSignIn(env)).toThrow()
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test("a matching stored uid cannot hide a changed stored accountId", () => {
+  const { dir, env } = makeDesktop()
+  try {
+    expect(() => desktopToken(env, "other@example.test", "67097")).toThrow()
+    expect(() => desktopToken(env, "urs-phoneyd.abc@163.com", "99001")).toThrow()
+    expect(() => desktopToken(env, undefined, "99001")).toThrow()
+    expect(desktopToken(env, undefined, "67097")).toBe(TOKEN)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test("an id-only sign-in still works after its verified user row gains yid", () => {
+  const tokens = `h.${b64({ sub: 67097 })}.s`
+  const { dir, env } = makeDesktop({ tokens, user: '{"id":67097}' })
+  try {
+    const signed = desktopSignIn(env)
+    expect(signed.accountId).toBe("67097")
+    updateDesktop(env, "auth_user", { id: "67097", yid: "same@example.test" })
+    expect(desktopToken(env, signed.accountId, signed.uid)).toBe(tokens)
+    expect(desktopSignIn(env).accountId).toBe("same@example.test")
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test("unrelated user fields do not supply identity without a common token identifier", () => {
+  const tokens = `h.${b64({ sub: 67097 })}.s`
+  const { dir, env } = makeDesktop({ tokens, user: '{"yid":"unverified@example.test"}' })
+  try {
+    expect(desktopSignIn(env).accountId).toBe("67097")
+    expect(() => desktopToken(env, "unverified@example.test")).toThrow()
+    expect(desktopToken(env, "67097")).toBe(tokens)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test("claims alone identify the same account when the user row disappears", () => {
+  const { dir, env } = makeDesktop({ user: null })
+  try {
+    const signed = desktopSignIn(env)
+    expect(signed.accountId).toBe("urs-phoneyd.abc@163.com")
+    expect(desktopToken(env, signed.accountId, signed.uid)).toBe(TOKEN)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 

@@ -388,7 +388,7 @@ kimi-k2.8-preview）用极短 prompt + `max_tokens=131072` 各打一次。全过
 **上游实测**（今天）：
 
 ```
-GET /api/client-activities/slot?placement=desktop_sidebar&clientVersion=2026.10.30&... 
+GET /api/client-activities/slot?placement=desktop_sidebar&clientVersion=2026.10.30&...
 → slotState: available, activityCode: daily-check-in-evergreen-prod-20260814
 
 GET /api/client-activities/<code>/context?configRevision=1

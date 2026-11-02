@@ -1,13 +1,14 @@
 import { test, expect } from "bun:test"
 import { errorOf, statusFor, makeFetch } from "../lib/proxy.mjs"
+import { runtimeModel } from "../lib/models.mjs"
 
 test("errorOf reads the proxy's nested error envelope", () => {
   expect(errorOf('{"type":"error","error":{"type":"proxy_error","message":"不支持的模型: x","code":40300}}'))
     .toEqual({ code: 40300, message: "不支持的模型: x" })
 })
 
-test("errorOf tolerates junk", () => {
-  expect(errorOf("nope")).toEqual({ code: 0, message: "" })
+test("errorOf preserves a plain-text error", () => {
+  expect(errorOf("nope")).toEqual({ code: 0, message: "nope" })
 })
 
 // 形态 B 把 message 直接写成字符串（实测 {error:{...}} 是对象，但上游两种都发得出）
@@ -123,7 +124,85 @@ test("an event:error whose data is not JSON is still an error", async () => {
     method: "POST", body: JSON.stringify({ model: "m", stream: true, messages: [] }),
   })
   expect(res.status).toBe(400)
-  expect((await res.json()).error.message).toContain("LobsterAI")
+  expect((await res.json()).error.message).toBe("gateway blew up")
+})
+
+const CONTENT_FRAME = 'data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}\n\n'
+
+function fetchResponse(response, stream = false) {
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "fake" }),
+    tokenOf: async (a) => a.key,
+    profileOf: () => undefined,
+    call: async () => response,
+  })
+  return f("https://offline.invalid", { body: JSON.stringify({ model: "m", stream, messages: [] }) })
+}
+
+for (const data of ["rate limit", '{"choices":[],"error":{"code":42900,"message":"rate limit"}}']) {
+  test(`a mid-stream event:error is fatal even with text or choices: ${data}`, async () => {
+    const res = await fetchResponse(sseResponse([CONTENT_FRAME, `event: error\ndata: ${data}\n\n`, "data: [DONE]\n\n"]))
+    expect(res.status).toBe(429)
+    expect(res.headers.get("X-Magpie-Sign-In")).toBeNull()
+    expect((await res.json()).error.message).toBe("rate limit")
+  })
+}
+
+for (const data of ["null", "false", "0", '"keepalive"', "[]", "not-json"]) {
+  test(`a non-object prelude does not hide the normal reply: ${data}`, async () => {
+    const res = await fetchResponse(sseResponse([`data: ${data}\n\n`, CONTENT_FRAME, "data: [DONE]\n\n"]))
+    expect(res.status).toBe(200)
+    expect((await res.json()).choices[0].message.content).toBe("partial")
+  })
+}
+
+// 不关闭传输连接：只发逻辑终止标志，确保没有把 EOF 当成必需条件。
+for (const stream of [false, true]) {
+  for (const prefix of ["", CONTENT_FRAME]) {
+    test(`DONE finishes and releases the upstream without EOF (stream=${stream}, content=${!!prefix})`, async () => {
+      let controller, cancelled = false, timer
+      const upstream = new ReadableStream({
+        start(c) { controller = c; c.enqueue(new TextEncoder().encode(prefix + "data: [DONE]\n\n")) },
+        cancel() { cancelled = true },
+      })
+      const pending = fetchResponse(new Response(upstream, { headers: { "content-type": "text/event-stream" } }), stream)
+        .then(async (res) => ({ status: res.status, text: await res.text() }))
+      try {
+        const result = await Promise.race([pending, new Promise((resolve) => { timer = setTimeout(() => resolve(null), 200) })])
+        expect(result).not.toBeNull()
+        expect(result.status).toBe(200)
+        if (stream) expect(result.text.trimEnd().endsWith("data: [DONE]")).toBe(true)
+        expect(cancelled).toBe(true)
+      } finally {
+        clearTimeout(timer)
+        if (!cancelled) controller.close()
+        await pending
+      }
+    })
+  }
+}
+
+for (const prefix of ["", CONTENT_FRAME]) {
+  test(`an error response releases its upstream (content=${!!prefix})`, async () => {
+    let controller, cancelled = false
+    const upstream = new ReadableStream({
+      start(c) { controller = c; c.enqueue(new TextEncoder().encode(prefix + UPSTREAM_ERR)) },
+      cancel() { cancelled = true },
+    })
+    try {
+      const res = await fetchResponse(new Response(upstream, { headers: { "content-type": "text/event-stream" } }))
+      expect(res.status).toBe(400)
+      expect(cancelled).toBe(true)
+    } finally { if (!cancelled) controller.close() }
+  })
+}
+
+test("streaming preserves prelude records in order", async () => {
+  const prelude = 'data: {"notice":"starting"}\n\n'
+  const res = await fetchResponse(sseResponse([prelude, CONTENT_FRAME, "data: [DONE]\n\n"]), true)
+  const text = await res.text()
+  expect(text.indexOf('"notice"')).toBeLessThan(text.indexOf('"choices"'))
+  expect(text).toContain('"partial"')
 })
 
 test("statusFor maps the observed codes", () => {
@@ -200,7 +279,7 @@ test("a good answer is reassembled for a non-streaming caller", async () => {
   // 成功要带 kept，magpie 才会清掉账号上的失效标记
   expect(res.headers.get("X-Magpie-Sign-In")).toBe("kept")
   // 请求体被改写：私有字段写入，档位标记清除
-  expect(seen.lobsterai_options).toEqual({ version: 1, thinking: { level: "high" } })
+  expect(seen.lobsterai_options).toEqual({ version: 1, thinking: { level: "off" } })
   expect(seen.reasoning_effort).toBeUndefined()
 })
 
@@ -237,6 +316,13 @@ const DS_PROFILE = {
   ],
   defaultLevel: "high",
 }
+const KIMI_PROFILE = {
+  options: [
+    { level: "high", openclawLevel: "high" },
+    { level: "max", openclawLevel: "xhigh" },
+  ],
+  defaultLevel: "high",
+}
 
 const okStream = () => sseResponse([
   'data: {"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
@@ -254,6 +340,20 @@ async function bodySeenFor(body, profile) {
   await f("https://up/v1/chat/completions", { method: "POST", body: JSON.stringify(body) })
   return seen
 }
+
+test("every advertised level stays within the active profile on the wire", async () => {
+  const model = runtimeModel({ modelId: "kimi-k3.1-pro", supportsThinking: true, thinkingConfig: KIMI_PROFILE })
+  for (const level of Object.keys(model.variants)) {
+    const seen = await bodySeenFor({ model: model.id, reasoning_effort: level, stream: false, messages: [] }, KIMI_PROFILE)
+    expect(KIMI_PROFILE.options.map((o) => o.level)).toContain(seen.lobsterai_options.thinking.level)
+    expect(seen.reasoning_effort).toBeUndefined()
+  }
+})
+
+test("a stale measured level cannot bypass the active profile", async () => {
+  const seen = await bodySeenFor({ model: "kimi-k3.1-pro", reasoning_effort: "low", stream: false, messages: [] }, KIMI_PROFILE)
+  expect(seen.lobsterai_options.thinking.level).toBe("high")
+})
 
 // 端到端锁：magpie 下发的是它自己阶梯里的 "none"，插件必须换成上游的 "off"。
 // 这条曾经是坏的 —— 变体名用了 "off"，magpie 够不着，最低档永远传不过来。

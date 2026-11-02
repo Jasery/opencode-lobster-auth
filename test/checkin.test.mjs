@@ -6,11 +6,17 @@ const realFetch = globalThis.fetch
 let calls = []
 let routes = {}
 
-function stub(r) {
-  calls.push(r)
-  const url = typeof r === "string" ? r : r.url
+function stub(input, init = {}) {
+  const url = typeof input === "string" ? input : input.url
+  const request = {
+    url,
+    method: init.method ?? input.method ?? "GET",
+    headers: new Headers(init.headers ?? input.headers),
+    body: init.body ?? null,
+  }
+  calls.push(request)
   for (const [key, fn] of Object.entries(routes)) {
-    if (url.includes(key)) return Promise.resolve(fn(r, url))
+    if (url.includes(key)) return Promise.resolve(fn(request, url))
   }
   return Promise.reject(new Error(`unstubbed: ${url}`))
 }
@@ -35,7 +41,7 @@ test("a day already claimed is done, and nothing is posted", async () => {
   routes["/context"] = () => json(ctx({ claimedToday: true, actions: [] }))
   const r = await checkinWith("tok", { version: V })
   expect(r.outcome).toBe("done")
-  expect(calls.some((c) => (c.method ?? "") === "POST")).toBe(false)
+  expect(calls.some((c) => c.method === "POST")).toBe(false)
 })
 
 test("an activity with no check_in action is ineligible", async () => {
@@ -53,7 +59,12 @@ test("claiming reports the credits once the re-read confirms it", async () => {
     return json(reads === 1 ? ctx({ claimedToday: false, claimedDays: 42 }) : ctx({ claimedToday: true, claimedDays: 43, actions: [] }))
   }
   routes["/actions/check_in"] = () => json({ code: 0, data: { creditsGranted: 100 } })
-  const r = await checkinWith("tok", { version: V })
+  const r = await checkinWith("tok", { version: V, idempotencyKey: "fixed-idem-key" })
+  const post = calls.find((c) => c.method === "POST")
+  expect(post).toBeDefined()
+  const postBody = JSON.parse(post.body)
+  expect(postBody).toEqual({ configRevision: 1, idempotencyKey: "fixed-idem-key", payload: {} })
+  expect(post.headers.get("authorization")).toBe("Bearer tok")
   expect(r.outcome).toBe("claimed")
   expect(r.credit).toBe(100)
   // 不能报 streak：claimedDays 是累计天数，magpie 会显示成「连续 N 天」
@@ -82,9 +93,8 @@ test("a claim whose re-read still says unclaimed is failed even if the POST said
   expect(r.message).toContain("复核")
 })
 
-// 首次读取就没有 claimedDays 时，「变化」不可判定；只认 claimedToday 变真，
-// 不能因为 before===null 就当成「观察到了变化」。
-test("a re-read that shows claimed but no day change is not treated as confirmed", async () => {
+// claimedToday 从 false 变成 true 已足够确认；累计天数可以滞后更新。
+test("a re-read that changes claimedToday confirms the claim without a day increment", async () => {
   let reads = 0
   routes["/client-activities/slot"] = () => json(SLOT_OK)
   routes["/context"] = () => {
@@ -167,6 +177,72 @@ test("clientVersion falls back to a known value and says it is not known", async
   const r = await clientVersion()
   expect(r.known).toBe(false)
   expect(r.version).toMatch(/^\d{4}\./)
+})
+
+for (const stage of ["slot", "context", "post", "verify"]) {
+  for (const [label, response] of [
+    ["HTTP 503 without code", () => json({ message: "Service unavailable" }, 503)],
+    ["missing business code", () => json({ message: "missing code" })],
+    ["HTTP 503 with success-looking body", () => json({ code: 0, data: { state: { claimedToday: true }, actions: [] } }, 503)],
+    ["malformed success data", () => json({ code: 0, data: null })],
+  ]) {
+    test(`${stage}: ${label} is retryable failed`, async () => {
+      let reads = 0
+      routes["/client-activities/slot"] = () => stage === "slot" ? response() : json(SLOT_OK)
+      routes["/context"] = () => {
+        reads += 1
+        if (stage === "context" || (stage === "verify" && reads > 1)) return response()
+        return json(ctx({ claimedToday: reads > 1 }))
+      }
+      routes["/actions/check_in"] = () => stage === "post" ? response() : json({ code: 0, data: {} })
+      const r = await checkinWith("tok", { version: V })
+      expect(r.outcome).toBe("failed")
+      expect(r.message?.length).toBeGreaterThan(0)
+      if (label.includes("503")) expect(r.message).toContain("503")
+      if (stage === "slot" || stage === "context") expect(calls.some((c) => c.method === "POST")).toBe(false)
+    })
+  }
+}
+
+for (const data of [
+  {},
+  { slotState: "available" },
+  { slotState: "available", activity: { activityCode: "x" } },
+]) {
+  test(`an invalid successful slot is failed: ${JSON.stringify(data)}`, async () => {
+    routes["/client-activities/slot"] = () => json({ code: 0, data })
+    const r = await checkinWith("tok", { version: V })
+    expect(r.outcome).toBe("failed")
+    expect(calls.some((c) => c.method === "POST")).toBe(false)
+  })
+}
+
+for (const data of [
+  { state: { claimedToday: "false" }, actions: ["check_in"] },
+  { state: {}, actions: ["check_in"] },
+  { state: { claimedToday: false } },
+  { state: { claimedToday: false }, actions: [null] },
+]) {
+  test(`an invalid context is failed before any POST: ${JSON.stringify(data)}`, async () => {
+    routes["/client-activities/slot"] = () => json(SLOT_OK)
+    routes["/context"] = () => json({ code: 0, data })
+    const r = await checkinWith("tok", { version: V })
+    expect(r.outcome).toBe("failed")
+    expect(calls.some((c) => c.method === "POST")).toBe(false)
+  })
+}
+
+test("a string claimedToday in verification cannot claim success", async () => {
+  let reads = 0
+  routes["/client-activities/slot"] = () => json(SLOT_OK)
+  routes["/context"] = () => json(ctx({ claimedToday: ++reads === 1 ? false : "false" }))
+  routes["/actions/check_in"] = () => json({ code: 0, data: {} })
+  expect((await checkinWith("tok", { version: V })).outcome).toBe("failed")
+})
+
+test("a failed version HTTP response cannot mark the fallback version as known", async () => {
+  routes["api-overmind"] = () => json({ data: { value: { version: "2026.10.30" } } }, 503)
+  expect((await clientVersion()).known).toBe(false)
 })
 
 test("readState carries the revision and the actions through", async () => {

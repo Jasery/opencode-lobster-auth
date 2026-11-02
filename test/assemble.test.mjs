@@ -51,6 +51,19 @@ test("non-streaming requests get one JSON body", async () => {
   expect(body.choices[0].message.content).toBe("hi")
 })
 
+test("streaming preserves an explicit multiline error event after content", async () => {
+  async function* records() {
+    yield { event: "", data: chunk({ content: "partial" }) }
+    yield { event: "error", data: "upstream failed\nplease retry" }
+    yield { event: "", data: "[DONE]" }
+  }
+  const res = await respond({ stream: true, model: "m" }, records())
+  const text = await res.text()
+  expect(res.status).toBe(200) // 已经开始转发，不能再改 HTTP 状态
+  expect(text).toContain("event: error\ndata: upstream failed\ndata: please retry\n\n")
+  expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true)
+})
+
 test("streaming requests get an SSE body ending in [DONE]", async () => {
   const res = await respond({ stream: true, model: "m" }, from([chunk({ content: "hi" })]))
   expect(res.headers.get("content-type")).toBe("text/event-stream")

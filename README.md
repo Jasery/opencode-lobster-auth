@@ -41,7 +41,9 @@ first way replaces it in place.
   - Linux: `~/.config/LobsterAI/lobsterai.sqlite`
 
   A database that isn't there, or one the app keeps encrypted, fails this
-  way with a message saying so; use the browser way instead.
+  way with a message saying so; use the browser way instead. The imported
+  identity is checked against the current token, and an incomplete or
+  conflicting identity fails closed rather than using another account's token.
 
 Both are kept in magpie's `plugin-auth.json`.
 
@@ -83,11 +85,14 @@ habits are handled:
 - **Every reply is SSE**, even one asked for with `stream: false`. A
   non-streaming caller gets one `chat.completion` reassembled from it; a
   streaming caller gets the events as they are.
-- **Failures ride inside a 200.** LobsterAI puts an error in the stream
-  (`event: error`) and still answers 200, which would leave a caller with
-  nothing to fail over on. The plugin reads the first record and answers the
-  status it means: `40100` → 401, `40300` → 403, `42900` or rate-limit
-  wording → 429, anything else → 400. A sign-in LobsterAI turns down is a
+- **Failures ride inside a 200.** LobsterAI puts errors in the stream
+  (`event: error`, or an error JSON record) and still answers 200, which
+  would leave a caller with nothing to fail over on. The plugin inspects the
+  early records, preserves plain-text error messages, and answers the status
+  it means: `40100` → 401, `40300` → 403, `42900` or rate-limit wording →
+  429, anything else → 400. Non-streaming requests also catch an error that
+  appears after an initial response chunk; streaming requests preserve such
+  an event after content has started. A sign-in LobsterAI turns down is a
   genuine 401, passed through with magpie's lapse mark so the account is
   flagged.
 - **Requests carry the desktop client's headers**
@@ -105,7 +110,9 @@ levels `off`/`high`/`max`. Those go out in LobsterAI's own field:
 `{"lobsterai_options":{"version":1,"thinking":{"level":"off"}}}`. Sending
 that field to a model **without** a profile is a hard error (`code 4000`,
 *model does not have a valid thinkingConfig*), so it is written only where
-there is a profile to map it through.
+there is a profile to map it through. With a profile, only its declared
+levels are offered; separately measured `reasoning_effort` levels apply only
+while a model has no profile.
 
 **10 models carry no profile** but still report `supportsThinking: true`.
 For those the plugin declares levels and lets magpie's `reasoning_effort`
@@ -142,10 +149,12 @@ it measured that for `kimi-k3`, `kimi-k3.1-pro` and `kimi-k2.8-preview`
 alike. A client that always sends `temperature` (most agents do) would
 otherwise be answered `50204 invalid temperature: only 1 is allowed`.
 
-`kimi-k3` alone adds two more: `reasoning_effort` is fixed to `max`, and an
-assistant tool call missing `reasoning_content` is given an empty one. That
-forcing is deliberately not extended to `kimi-k3.1-pro`, which honours the
-full ladder and would otherwise have every level silently overridden.
+Only `kimi-k3` has `reasoning_effort` fixed to `max`. That forcing is
+not extended to `kimi-k3.1-pro`, which honours the full ladder and would
+otherwise have every level silently overridden. Separately, tool-call
+history repair stays enabled for the `kimi-k3` family, including
+`kimi-k3.1-pro`: an assistant tool call missing `reasoning_content` is given
+an empty string without overwriting existing reasoning or the chosen effort.
 
 `kimi-k3` is one of the models LobsterAI serves without listing it in every
 catalogue revision. It is kept in the list this package declares for a
@@ -193,7 +202,9 @@ This is the only way to collect those points without opening LobsterAI's own
 desktop app, whose sidebar holds the check-in. The claim is idempotent — a
 day already claimed answers `51104`, and the plugin reports `done` rather
 than claiming again — and every claim is confirmed by re-reading the state
-before it is reported as `claimed`.
+before it is reported as `claimed`. HTTP failures, malformed business
+responses and invalid state are reported as `failed`, not as an inactive
+activity or an ineligible account, so magpie can retry later that day.
 
 ## Not here
 

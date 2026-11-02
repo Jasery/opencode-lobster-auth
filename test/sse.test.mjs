@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test"
-import { sse, first, chain } from "../lib/sse.mjs"
+import { sse, chain } from "../lib/sse.mjs"
 
 async function* from(list) { for (const s of list) yield new TextEncoder().encode(s) }
 const collect = async (it) => { const out = []; for await (const r of it) out.push(r); return out }
@@ -24,15 +24,28 @@ test("flushes a trailing event with no blank line", async () => {
   expect(got).toEqual([{ event: "", data: "tail" }])
 })
 
-test("first() peeks without losing the record", async () => {
-  const { head, rest } = await first(sse(from(["data: one\n\ndata: two\n\n"])))
-  expect(head).toEqual({ event: "", data: "one" })
-  expect(await collect(rest)).toEqual([{ event: "", data: "one" }, { event: "", data: "two" }])
+test("chain forwards early return while still replaying held records", async () => {
+  let returned = 0
+  const rest = {
+    next: async () => ({ done: true }),
+    return: async () => { returned += 1; return { done: true } },
+  }
+  const it = chain([{ event: "", data: "held" }], rest)
+  await it.next()
+  await it.return()
+  expect(returned).toBe(1)
 })
 
-test("first() on an empty stream yields null", async () => {
-  const { head } = await first(sse(from([])))
-  expect(head).toBeNull()
+test("chain forwards early return after reading live records", async () => {
+  let closed = false
+  async function* rest() {
+    try { yield { event: "", data: "live" }; yield { event: "", data: "more" } }
+    finally { closed = true }
+  }
+  const it = chain([], rest())
+  await it.next()
+  await it.return()
+  expect(closed).toBe(true)
 })
 
 test("chain replays held records then the rest", async () => {
