@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test"
-import { levelOf, variantsOf, applyThinking, isKimiK3, applyKimiK3 } from "../lib/thinking.mjs"
+import { levelOf, variantsOf, applyThinking, isKimiK3, applyKimi } from "../lib/thinking.mjs"
 
 // 实测自 deepseek-flash 的 thinkingConfig
 const PROFILE = {
@@ -89,7 +89,47 @@ test("isKimiK3 matches the family but not unrelated ids", () => {
   expect(isKimiK3("kimi-k2.6")).toBe(false)
 })
 
-test("applyKimiK3 fixes sampling and repairs tool-call reasoning", () => {
+// 上游拒收非默认采样参数的，实测是整个 Kimi 家族，不只是 kimi-k3：
+// kimi-k3 / kimi-k3.1-pro / kimi-k2.8-preview 带 temperature=0.7 都报
+// 50204 invalid temperature: only 1 is allowed for this model
+// 而「强制 reasoning_effort=max」只属于 kimi-k3 家族 —— k3.1-pro 实测认完整档位
+// （none/low/max → 0B/20B/156B），压成 max 会悄悄改掉用户选的档位。
+// 所以这两个契约必须分开：applyKimi 按模型挑该做哪几件。
+test("applyKimi strips fixed sampling params across the whole kimi family", () => {
+  for (const model of ["kimi-k3", "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed", "kimi-k2.8-preview"]) {
+    const req = { model, temperature: 0.7, top_p: 0.5, n: 2, presence_penalty: 0.5, frequency_penalty: 0.5, messages: [] }
+    applyKimi(req, model)
+    expect(req.temperature).toBeUndefined()
+    expect(req.top_p).toBeUndefined()
+    expect(req.n).toBeUndefined()
+    expect(req.presence_penalty).toBeUndefined()
+    expect(req.frequency_penalty).toBeUndefined()
+  }
+})
+
+test("applyKimi leaves the level alone for kimi models without the max contract", () => {
+  const req = { model: "kimi-k2.8-preview", reasoning_effort: "low", messages: [] }
+  applyKimi(req, "kimi-k2.8-preview")
+  expect(req.reasoning_effort).toBe("low")
+})
+
+test("applyKimi still forces max for kimi-k3 itself", () => {
+  const req = { model: "kimi-k3", reasoning_effort: "none", messages: [] }
+  applyKimi(req, "kimi-k3")
+  expect(req.reasoning_effort).toBe("max")
+})
+
+// 反向保护：非 Kimi 模型的采样参数不能被删（deepseek/glm/qwen 实测都收 temperature）
+test("applyKimi leaves a non-kimi model's sampling params alone", () => {
+  for (const model of ["deepseek-flash", "glm-5.3", "qwen3.8-max", "MiniMax-M3"]) {
+    const req = { model, temperature: 0.7, top_p: 0.5, messages: [] }
+    applyKimi(req, model)
+    expect(req.temperature).toBe(0.7)
+    expect(req.top_p).toBe(0.5)
+  }
+})
+
+test("applyKimi fixes sampling and repairs tool-call reasoning for kimi-k3", () => {
   const req = {
     model: "kimi-k3", temperature: 0.7, top_p: 0.9, n: 1,
     presence_penalty: 0, frequency_penalty: 0, thinking: { type: "enabled" },
@@ -99,7 +139,7 @@ test("applyKimiK3 fixes sampling and repairs tool-call reasoning", () => {
       { role: "assistant", tool_calls: [{ id: "c", type: "function", function: { name: "f", arguments: "{}" } }] },
     ],
   }
-  applyKimiK3(req)
+  applyKimi(req, "kimi-k3")
   expect(req.temperature).toBeUndefined()
   expect(req.top_p).toBeUndefined()
   expect(req.n).toBeUndefined()
