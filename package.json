@@ -1,6 +1,6 @@
 {
   "name": "opencode-lobster-auth",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "OpenCode provider plugin: NetEase Youdao LobsterAI (有道龙虾)",
   "type": "module",
   "main": "./index.mjs",
