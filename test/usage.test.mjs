@@ -71,6 +71,26 @@ test("signIn rides along when given", () => {
   expect(usageFrom(QUOTA, PROFILE, "renewed").signIn).toBe("renewed")
 })
 
+// 时区归一：上游不带偏移量，magpie 用 new Date(...) 读，裸时间在 UTC 主机上差 8 小时。
+// 各种可能出现的形态都要补上 +08:00，否则那个 bug 只是换了形状。
+test("every time shape upstream plausibly sends carries the offset", () => {
+  const at = (s) => usageFrom(QUOTA, { ...PROFILE, creditItems: [{ creditsRemaining: 10, expiresAt: s }] })
+    .windows.find((x) => x.name === "余额").runsOutAt
+  expect(at("2026-11-11T09:11:24")).toBe("2026-11-11T09:11:24+08:00")       // 带秒
+  expect(at("2026-11-11T09:11")).toBe("2026-11-11T09:11:00+08:00")           // 不带秒
+  expect(at("2026-11-11T09:11:24.123")).toBe("2026-11-11T09:11:24.123+08:00") // 带毫秒
+  expect(at("2026-11-11 09:11:24")).toBe("2026-11-11T09:11:24+08:00")        // 空格分隔
+  expect(at("2026-11-11")).toBe("2026-11-11")                                // 只有日期：整天语义
+  expect(at("2026-11-11T09:11:24Z")).toBe("2026-11-11T09:11:24Z")            // 已有偏移不重复加
+  expect(at("2026-11-11T09:11:24+08:00")).toBe("2026-11-11T09:11:24+08:00")
+})
+
+// 脏数据原样透传，不能编一个时间出来
+test("an unparseable time is passed through rather than invented", () => {
+  const u = usageFrom(QUOTA, { ...PROFILE, creditItems: [{ creditsRemaining: 10, expiresAt: "not-a-date" }] })
+  expect(u.windows.find((x) => x.name === "余额").runsOutAt).toBe("not-a-date")
+})
+
 test("missing pieces degrade instead of throwing", () => {
   const u = usageFrom({}, {})
   expect(u.windows).toEqual([])

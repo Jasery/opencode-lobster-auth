@@ -142,6 +142,57 @@ test("an unreadable desktop token is reported as a lapsed sign-in", () => {
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+// 桌面端把 auth_user 写成读不出身份的行（新账号还没落库、或行被写坏），
+// 而 auth_tokens 里已经是别人的了 —— 这是串号最容易发生的时刻。
+// 此时身份的兜底来源是 token 自己的 claims；连 claims 都没有就必须 fail-closed，
+// 不能把 token 交出去。
+test("a desktop token with no readable identity anywhere is not handed out", () => {
+  const opaque = `h.${b64({ typ: "Bearer" })}.s` // 没有任何 yid / sub
+  const { dir, env } = makeDesktop({ tokens: opaque, user: "{}" })
+  try {
+    let caught = null
+    try { desktopToken(env, "urs-phoneyd.abc@163.com") } catch (e) { caught = e }
+    expect(caught?.signIn).toBe("expired")
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// 身份有两个来源：auth_user 行、token 自己的 claims。行的 yid 丢了也不影响
+// accountId —— readCredentials 会从 claims 兜底，所以同一账号的身份是稳定的。
+test("an account's identity survives losing yid from the auth_user row", () => {
+  const { dir, env } = makeDesktop()
+  try {
+    const signed = desktopSignIn(env)
+    const db = new Database(dbPath(env))
+    db.run("UPDATE kv SET value=? WHERE key='auth_user'", ['{"id":67097}'])
+    db.close()
+    // 行里没 yid 了，但 claims 里还有，身份不变，不该被判成换账号
+    expect(() => desktopToken(env, signed.accountId, signed.uid)).not.toThrow()
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// 只靠数字 id 也要能认出同一个号（yid 缺失时 accountId 退化成 id 的字符串）
+test("an account stored by its numeric id is recognised by its uid", () => {
+  const opaque = `h.${b64({ sub: 67097, exp: 1793152423 })}.s` // 无 yid
+  const { dir, env } = makeDesktop({ tokens: opaque, user: '{"id":67097}' })
+  try {
+    const signed = desktopSignIn(env)
+    expect(signed.accountId).toBe("67097")
+    expect(() => desktopToken(env, signed.accountId, signed.uid)).not.toThrow()
+    expect(() => desktopToken(env, "someone-else", "999")).toThrow()
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// yid 是数字时也要能比对：magpie 往返一轮后回来的是字符串
+test("a numeric yid still compares equal to the stored string", () => {
+  const { dir, env } = makeDesktop({ user: '{"yid":12345,"id":67097}' })
+  try {
+    const signed = desktopSignIn(env)
+    expect(typeof signed.accountId).toBe("string")
+    expect(() => desktopToken(env, signed.accountId, signed.uid)).not.toThrow()
+    expect(() => desktopToken(env, "99999", "1")).toThrow()
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test("junk in the row reads as null", () => {
   const { dir, file } = makeDb({ tokens: null, user: null })
   try {

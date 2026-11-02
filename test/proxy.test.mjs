@@ -68,6 +68,49 @@ test("a chunk that carries both choices and an error field is not an error frame
   expect((await res.json()).choices[0].message.content).toBe("hi")
 })
 
+// 错误不一定打头：上游可能先发一条 role 空帧（正常 chunk），再发错误。
+// 只看首帧的话这种情况仍然会被吞成一个 200 空回复。
+test("a form-B error in the second record is still caught", async () => {
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
+    profileOf: () => undefined,
+    call: async () => sseResponse([
+      'data: {"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n',
+      UPSTREAM_ERR,
+      "data: [DONE]\n\n",
+    ]),
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST", body: JSON.stringify({ model: "m", stream: false, messages: [] }),
+  })
+  // 非流式整条流都在手里，中段的错误帧也要能还原成真正的状态码
+  expect(res.status).toBe(400)
+  expect((await res.json()).error.message).toContain("invalid temperature")
+})
+
+// 决定性用例：首帧是 role 空帧、错误在第二帧，且调用方**不流式** ——
+// 此时整条流都在我们手里，必须能报错。
+test("a non-streaming caller never gets an empty reply when an error follows a role chunk", async () => {
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
+    profileOf: () => undefined,
+    call: async () => sseResponse([
+      'data: {"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n',
+      UPSTREAM_ERR,
+      "data: [DONE]\n\n",
+    ]),
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST", body: JSON.stringify({ model: "m", stream: false, messages: [] }),
+  })
+  const body = await res.json()
+  // 现状：200 + content:"" + finish_reason:stop（静默失败）
+  // 期望：把中段错误帧也识别出来，变成错误响应
+  expect(body.error?.message ?? "").toContain("invalid temperature")
+})
+
 // 形态 A 的 data 不保证是 JSON，event 行的判断必须保留
 test("an event:error whose data is not JSON is still an error", async () => {
   const f = makeFetch({

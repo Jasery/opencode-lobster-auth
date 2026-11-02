@@ -33,7 +33,7 @@ async function apiGet(path, token, timeout = 20_000) {
 // signIn:"expired"（多账号时后者防止串号）。
 async function tokenOf(auth) {
   if (!auth) return ""
-  if (auth.source === "desktop") return desktopToken(process.env, auth.accountId)
+  if (auth.source === "desktop") return desktopToken(process.env, auth.accountId, auth.uid)
   return auth.type === "oauth" ? (auth.access ?? "") : (auth.key ?? "")
 }
 

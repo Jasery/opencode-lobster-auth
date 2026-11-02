@@ -96,3 +96,18 @@ test("a model that does not think gets no levels", () => {
   expect(m.capabilities.reasoning).toBe(false)
   expect(m.variants).toEqual({})
 })
+
+// 两个来源可能同时存在：上游某天给某个模型补了 thinkingConfig，而它也在实测表里。
+// 这时不能静默丢掉实测档位（那等于把 6 档降成 3 档），要合并。
+test("measured levels survive a model that also gains a thinking profile", () => {
+  const both = runtimeModel({ ...NO_PROFILE, modelId: "kimi-k3.1-pro", thinkingConfig: ENTRY.thinkingConfig }, {})
+  const keys = Object.keys(both.variants)
+  // 实测的 6 档一个不少
+  for (const lv of ["none", "low", "medium", "high", "xhigh", "max"]) expect(keys).toContain(lv)
+})
+
+// 有档位表但不在实测表里的模型，仍然只用档位表（别凭空加档）
+test("a profile-only model keeps exactly its profile's levels", () => {
+  const m = runtimeModel({ ...ENTRY, modelId: "some-glm-model" }, {})
+  expect(Object.keys(m.variants).sort()).toEqual(["high", "max", "none"])
+})
