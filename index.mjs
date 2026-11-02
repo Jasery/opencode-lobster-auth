@@ -4,6 +4,7 @@ import { modelsFromCatalog, profileOfFrom } from "./lib/models.mjs"
 import { usageFrom } from "./lib/usage.mjs"
 import { desktopSignIn, desktopToken } from "./lib/auth-import.mjs"
 import { beginSignIn, beginSignInAnnounced } from "./lib/auth-login.mjs"
+import { checkinWith } from "./lib/checkin.mjs"
 import { jwtExp } from "./lib/jwt.mjs"
 
 const REFRESH_LEAD = 6 * 3600 * 1000
@@ -177,6 +178,20 @@ export const LobsterAuthPlugin = async () => ({
           signIn: e.signIn === "expired" ? "expired" : "kept",
         }
       }
+    },
+
+    // 每日积分礼（签到）。magpie 在开关打开后，对每个已登录账号每天各调一次。
+    // 这是写操作，开关默认关，由用户在 Settings → Usage → Plugins 打开。
+    // 逻辑见 lib/checkin.mjs；这里只负责取 token 和兜住异常。
+    async checkin(getAuth) {
+      const auth = await getAuth()
+      let token = ""
+      try {
+        token = await tokenOf(auth)
+      } catch (e) {
+        return { outcome: "failed", message: e.message }
+      }
+      return checkinWith(token)
     },
   },
 
