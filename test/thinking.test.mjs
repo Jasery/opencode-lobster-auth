@@ -83,9 +83,12 @@ test("applyThinking reports whether it wrote the protocol field", () => {
   expect(applyThinking({ model: "kimi-k2.6", messages: [] }, { options: [] })).toBe(false)
 })
 
-test("isKimiK3 matches the family but not unrelated ids", () => {
+test("isKimiK3 is the exact kimi-k3 id", () => {
   expect(isKimiK3("kimi-k3")).toBe(true)
-  expect(isKimiK3("kimi-k3-auto-max")).toBe(true)
+  // kimi-k3.1-pro 实测认完整档位（none/low/max → 0B/20B/156B），
+  // 压成 max 会把它刚声明出来的档位全部抹掉
+  expect(isKimiK3("kimi-k3.1-pro")).toBe(false)
+  expect(isKimiK3("kimi-k3.1-pro-highspeed")).toBe(false)
   expect(isKimiK3("kimi-k2.6")).toBe(false)
 })
 
@@ -117,6 +120,15 @@ test("applyKimi still forces max for kimi-k3 itself", () => {
   const req = { model: "kimi-k3", reasoning_effort: "none", messages: [] }
   applyKimi(req, "kimi-k3")
   expect(req.reasoning_effort).toBe("max")
+})
+
+// 收窄之后，k3.1-pro 的档位必须原样透传 —— 否则它声明出来的档位是假的
+test("applyKimi no longer overrides kimi-k3.1-pro's level", () => {
+  for (const lv of ["none", "low", "xhigh", "max"]) {
+    const req = { model: "kimi-k3.1-pro", reasoning_effort: lv, messages: [] }
+    applyKimi(req, "kimi-k3.1-pro")
+    expect(req.reasoning_effort).toBe(lv)
+  }
 })
 
 // 反向保护：非 Kimi 模型的采样参数不能被删（deepseek/glm/qwen 实测都收 temperature）
