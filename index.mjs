@@ -28,10 +28,11 @@ async function apiGet(path, token, timeout = 20_000) {
 
 // 取这次请求要用的 token。
 // 桌面端导入的账号自己不存 token（见 lib/auth-import.mjs），每次现读 ——
-// 桌面端续期后插件自动跟上。读不到就抛 signIn:"expired"。
+// 桌面端续期后插件自动跟上。读不到、或桌面端已经换成别的账号，都抛
+// signIn:"expired"（多账号时后者防止串号）。
 async function tokenOf(auth) {
   if (!auth) return ""
-  if (auth.source === "desktop") return desktopToken()
+  if (auth.source === "desktop") return desktopToken(process.env, auth.accountId)
   return auth.type === "oauth" ? (auth.access ?? "") : (auth.key ?? "")
 }
 

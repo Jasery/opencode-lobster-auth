@@ -50,7 +50,7 @@ test("a missing file reads as null, not a throw", () => {
 })
 
 // 造一份「桌面端已经登录」的环境：目录按各平台的 dbPath 规则摆好
-function makeDesktop({ tokens = TOKEN } = {}) {
+function makeDesktop({ tokens = TOKEN, user = '{"yid":"urs-phoneyd.abc@163.com","id":67097,"nickname":"Ada"}' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "lobster-desktop-"))
   const env = { APPDATA: dir, HOME: dir, USERPROFILE: dir, XDG_CONFIG_HOME: dir }
   const file = dbPath(env)
@@ -59,7 +59,7 @@ function makeDesktop({ tokens = TOKEN } = {}) {
   db.run("CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)")
   if (tokens !== null) {
     db.run("INSERT INTO kv VALUES (?,?,?)", ["auth_tokens", JSON.stringify({ accessToken: tokens, refreshToken: "r" }), 0])
-    db.run("INSERT INTO kv VALUES (?,?,?)", ["auth_user", '{"yid":"urs-phoneyd.abc@163.com","id":67097,"nickname":"Ada"}', 0])
+    if (user !== null) db.run("INSERT INTO kv VALUES (?,?,?)", ["auth_user", user, 0])
   }
   db.close()
   return { dir, env }
@@ -77,7 +77,39 @@ test("the desktop sign-in stores no token of its own", () => {
     expect(r.expires).toBe(0)
     expect(r.source).toBe("desktop")
     expect(r.accountId).toBe("urs-phoneyd.abc@163.com")
-    expect(r.uid).toBe(67097)
+    // magpie 只认字符串 uid（源码 uidOf），存成数字等于没存
+    expect(r.uid).toBe("67097")
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// magpie 支持一个插件挂多个账号。桌面端只有一个「当前登录」，所以插件的
+// 桌面账号必须核对身份，否则桌面端换账号后，原账号会悄悄用上别人的 token：
+// 卡片显示别人的余额、请求扣别人的积分、签到签在别人头上。
+test("a desktop token read for a different account reports a changed account", () => {
+  const { dir, env } = makeDesktop({
+    user: '{"yid":"someone-else@163.com","id":99001,"nickname":"Bob"}',
+  })
+  try {
+    let caught = null
+    try { desktopToken(env, "urs-phoneyd.abc@163.com") } catch (e) { caught = e }
+    expect(caught?.signIn).toBe("expired")
+    expect(caught?.message).toContain("切换")
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test("a desktop token read for the same account is returned", () => {
+  const { dir, env } = makeDesktop()
+  try {
+    expect(desktopToken(env, "urs-phoneyd.abc@163.com")).toBe(TOKEN)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// 身份比对之前签入的老账号没有 accountId，不能因此就判定失效
+test("an account signed in before identity was kept still reads its token", () => {
+  const { dir, env } = makeDesktop()
+  try {
+    expect(desktopToken(env)).toBe(TOKEN)
+    expect(desktopToken(env, undefined)).toBe(TOKEN)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
