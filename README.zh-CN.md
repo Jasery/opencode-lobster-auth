@@ -80,52 +80,87 @@ completions。LobsterAI 有三个习惯被处理掉了：
 
 ### 思考档位
 
-模型的 `thinkingConfig` 决定它有哪些档位 —— 当前目录里是 `off`、`high`、
-`max` —— 它们通过 LobsterAI 自己的字段上线：
-`{"lobsterai_options":{"version":1,"thinking":{"level":"off"}}}`。
+目录里的模型分两种，插件用两种方式对待。
+
+**8 个模型自带 `thinkingConfig`**（`deepseek-*`、`glm-*`），档位是
+`off`/`high`/`max`。它们走 LobsterAI 自己的字段：
+`{"lobsterai_options":{"version":1,"thinking":{"level":"off"}}}`。把该字段发给
+**没有**档位表的模型是硬错误（`code 4000`，*model does not have a valid
+thinkingConfig*），所以只在有档位表可映射时才写。
+
+**10 个模型没有档位表**，但同样报 `supportsThinking: true`。对这些模型，插件
+声明档位、让 magpie 的 `reasoning_effort` 原样透传，LobsterAI 认这个字段。
 
 有两件事值得知道：
 
-- **`lobsterai_options` 只发给自带档位表的模型。** 29 个模型里有 21 个没有
-  档位表，给这些模型带上该字段是硬错误（`code 4000`，*model does not have a
-  valid thinkingConfig*），整轮对话直接失败。只有在有档位表可映射时，档位才会
-  被传下去。
 - **最低档对外叫 `none`，不叫 `off`。** magpie 不使用 variant 里存的东西，它
   按自己的一条阶梯（`none/minimal/low/medium/high/xhigh/max`）把
   `reasoning_effort` 映射到「模型声明过的那个档位名」。`off` 不在那条阶梯上，
-  所以声明成 `off` 的那一档永远选不中。插件对外声明 `none`，写给 LobsterAI
-  时再换回 `off`。
+  所以声明成 `off` 的那一档永远选不中。有档位表时插件声明 `none`、写给
+  LobsterAI 时换回 `off`；没有档位表时直接发 `none`，LobsterAI 就认它。
+- **每个模型的档位不一样，是实测出来的，不是假设的。** LobsterAI 会直接拒收
+  一部分：`MiniMax-M3.1-Flash` 拒收 `none`（*requires adaptive thinking*），
+  `qwen3.7-max` 只到 `xhigh`，`qwen3.7-plus` 的 `max` 偶发 500。`MiniMax-M3`
+  的思考写在 content 里的 `<think>` 标签中、`reasoning_content` 恒为空，上游
+  也不分档，所以只给 `none` 和 `max`。没实测过的模型一律不声明档位，magpie 会
+  显示成 *thinks, no levels*。
 
 在 `deepseek-flash` 上实测：`none` 会让 `reasoning_content` 恰好为 0 字节，
-而 `high`、`max` 和不指定档位都不会。
+而 `high`、`max` 和不指定档位都不会。在 `kimi-k3.1-pro` 上实测：`none` 为
+0 字节，`xhigh` 有输出。
 
-### Kimi K3
+### Kimi
 
-LobsterAI 的 `kimi-k3` 采样参数由服务端固定，因此 `temperature`、`top_p`、
-`n` 和两个 penalty 会被删掉，`reasoning_effort` 固定为 `max`，缺少
-`reasoning_content` 的 assistant 工具调用会被补一个空串。
+所有 Kimi 模型的采样参数都由服务端固定：`temperature` 必须是 1、`top_p` 是
+0.95、两个 penalty 是 0。所以插件对整个家族删掉 `temperature`、`top_p`、
+`n` 和两个 penalty —— `kimi-k3`、`kimi-k3.1-pro`、`kimi-k2.8-preview` 三个
+都实测过。客户端只要带了非 1 的 `temperature`（多数 agent 都带），否则会被
+回一句 `50204 invalid temperature: only 1 is allowed`。
 
-`kimi-k3` 属于 LobsterAI「能用但没列出」的模型：`/api/models/available`
-返回 29 个模型，其中没有 K3，但对 `kimi-k3` 发请求能正常作答。它保留在
-本插件为未登录账号声明的兜底表里，所以 `lobster/kimi-k3` 是可选的 ——
-上面那段处理也因此是**实际生效的**，不是预防性代码。
+`kimi-k3` 单独再加两条：`reasoning_effort` 固定为 `max`，缺少
+`reasoning_content` 的 assistant 工具调用补一个空串。这个「强制 max」
+**刻意没有**扩展到 `kimi-k3.1-pro`：后者实测认完整档位，强制 max 会把每一档
+都悄悄覆盖掉。
+
+`kimi-k3` 属于 LobsterAI「能用但某些版本目录里没列出」的模型。它保留在本插件
+为未登录账号声明的兜底表里，所以 `lobster/kimi-k3` 仍可选。
 
 ## 模型
 
-登录后，列表来自账号自己（`/api/models/available`）：29 个模型，各带上下文
-窗口、是否收图片、以及它的思考档位。登录之前用一份 5 个模型的静态列表兜底，
-这样 provider 在登录前就可见。
+登录后，列表来自账号自己（`/api/models/available`）—— 18 或 19 个可用模型，
+各带上下文窗口、是否收图片、以及它的思考档位。登录之前用一份 5 个模型的静态
+列表兜底，这样 provider 在登录前就可见。
 
 `costMultiplier` 成为 magpie 的 `rate`。它是**分时计价**：`deepseek-flash`
 在 LobsterAI 的空闲时段是 0.05，高峰时段是 0.1（高峰为北京时间
 09:00–12:00 与 14:00–18:00）。倍率是在拉列表时读的，所以可能有一阵子是过时
 的。
 
+输出上限是 131,072。目录里的 `maxTokens` 字段恒为 null，所以这是实测的：
+18 个模型全部接受 `max_tokens=131072`，`glm-5.3` 自己报的范围就是
+`[1, 131072]`，要到 524,288 才开始 500。
+
 ## 用量
 
-`magpie quota` 显示免费额度、它的到期时间和剩余点数，数据来自
-`/api/user/quota` 与 `/api/user/profile-summary`。插件上报的是 `kept`：它自己
+`magpie quota` 显示剩余点数与最早到期的那批积分，数据来自
+`/api/user/quota` 与 `/api/user/profile-summary`。积分按**钱包窗口**上报
+（`余额·点数`，带 `runsOut`/`runsOutAt`），而不是一个字符串 —— 这样 magpie
+能显示出到期时间，路由也能优先用快过期的账号。每天签到领的 100 点各是一批、
+30 天后到期、先到先用，所以知道日期是有意义的。插件上报的是 `kept`：它自己
 不续期，因此不该声称做过一次它没做的续期。
+
+已失效的免费额度不再作为有效窗口显示 —— 免费期 2026 年 8 月就结束了，
+之前还按「6% used」显示，看起来像还有一笔可用额度。
+
+## 每日签到
+
+插件实现了 `auth.checkin`，所以 magpie 可以替你领 LobsterAI 的每日积分礼
+（100 点）。**默认关闭**：在 Settings → Usage → Plugins 打开。打开后，每个
+已登录的 LobsterAI 账号每天（北京时间）各签一次。
+
+这是不开 LobsterAI 桌面端时唯一能领到这些积分的办法 —— 签到入口在桌面端侧栏。
+领取是幂等的：当天已领会回 `51104`，插件报 `done` 而不是重复领；每次领取都会
+重新读一次状态复核，通过了才报 `claimed`。
 
 ## 不做的事
 
@@ -134,13 +169,20 @@ LobsterAI 的 `kimi-k3` 采样参数由服务端固定，因此 `temperature`、
 - **经过验证的 `/api/auth/refresh`。** 调用它可能消耗账号真实的 refresh
   token，因此没有实测。续期这条路是照着桌面端自己的代码写的，没有与服务端
   核对过。
-- **精确的输出上限。** 目录里没有这个字段。插件声明了保守的 32,000；实测
-  LobsterAI 接受 262,144，在 524,288 时返回 500，所以真实上限在两者之间。
 - **OpenCode。** 这个插件是按 OpenCode 的 provider 插件格式写的 —— magpie
   加载的正是这个格式 —— 但只在 magpie 上实测过。`auth.refresh`、
-  `auth.refreshLead` 以及 `package.json` 里的 `magpie` 字段是 magpie 自己的，
-  OpenCode 会忽略它们。
-- **同时使用多个账号。** magpie 每个 provider 只保留一份登录。
+  `auth.refreshLead`、`auth.checkin` 以及 `package.json` 里的 `magpie` 字段
+  是 magpie 自己的，OpenCode 会忽略它们。
+
+## 多个账号
+
+magpie 允许一个 provider 挂多个登录，本插件支持这一点：用浏览器再登一个有道
+账号，两个都会列出来。
+
+桌面端导入是需要注意的那个。LobsterAI 桌面端同一时间只有一个账号登录，而插件
+每次请求都现读它的 token。所以桌面导入的账号绑在「导入那一刻登录的账号」上：
+把桌面端切到别的账号后，原账号会被标成 *需要重新登录*，而不是悄悄花掉另一个
+账号的积分。重新登录它，或者对需要独立存在的账号改用浏览器登录。
 
 ## 开发
 

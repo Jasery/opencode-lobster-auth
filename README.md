@@ -97,58 +97,103 @@ habits are handled:
 
 ### Thinking levels
 
-A model's `thinkingConfig` gives it levels — `off`, `high`, `max` in the
-current catalogue — and they reach the wire in LobsterAI's own field:
-`{"lobsterai_options":{"version":1,"thinking":{"level":"off"}}}`.
+There are two kinds of model in LobsterAI's catalogue, and the plugin
+speaks to each in its own way.
+
+**8 models carry a `thinkingConfig`** (`deepseek-*`, `glm-*`), with the
+levels `off`/`high`/`max`. Those go out in LobsterAI's own field:
+`{"lobsterai_options":{"version":1,"thinking":{"level":"off"}}}`. Sending
+that field to a model **without** a profile is a hard error (`code 4000`,
+*model does not have a valid thinkingConfig*), so it is written only where
+there is a profile to map it through.
+
+**10 models carry no profile** but still report `supportsThinking: true`.
+For those the plugin declares levels and lets magpie's `reasoning_effort`
+pass straight through, which LobsterAI honours.
 
 Two things are worth knowing:
 
-- **`lobsterai_options` is only for models that have a thinking profile.**
-  21 of the 29 models have none, and sending the field to one of those is a
-  hard error (`code 4000`, *model does not have a valid thinkingConfig*), so
-  the whole chat fails. A level is passed on only where there is a profile
-  to map it through.
 - **The lowest level is offered as `none`, not `off`.** magpie doesn't use
   what a variant holds; it maps `reasoning_effort` onto a level name the
   model declared, from a ladder of its own
   (`none/minimal/low/medium/high/xhigh/max`). `off` is not on that ladder,
-  so a level declared as `off` can never be chosen. The plugin declares
-  `none` and turns it back into `off` for LobsterAI.
+  so a level declared as `off` can never be chosen. With a profile the
+  plugin declares `none` and turns it back into `off`; without one it sends
+  `none` as it is, since LobsterAI accepts it.
+- **Levels differ per model and were measured, not assumed.** LobsterAI
+  refuses some of them outright: `MiniMax-M3.1-Flash` rejects `none`
+  (*requires adaptive thinking*), `qwen3.7-max` stops at `xhigh`, and
+  `qwen3.7-plus` answers `max` with an occasional 500. `MiniMax-M3` writes
+  its thinking into `<think>` tags inside the content and `reasoning_content`
+  stays empty; its effort isn't graded at all, so it offers only `none` and
+  `max`. A model whose levels were not measured declares none, and magpie
+  shows it as *thinks, no levels*.
 
 Measured on `deepseek-flash`: `none` leaves `reasoning_content` at exactly
-0 bytes, while `high`, `max` and no level at all don't.
+0 bytes, while `high`, `max` and no level at all don't — and on
+`kimi-k3.1-pro`, `none` leaves it at 0 bytes while `xhigh` produces some.
 
-### Kimi K3
+### Kimi
 
-LobsterAI's `kimi-k3` takes its sampling parameters from the server, so
-`temperature`, `top_p`, `n` and the penalties are dropped, `reasoning_effort`
-is fixed to `max`, and an assistant tool call missing `reasoning_content` is
-given an empty one.
+Every Kimi model takes its sampling parameters from the server:
+`temperature` must be 1, `top_p` 0.95 and the penalties 0, so the plugin
+drops `temperature`, `top_p`, `n` and both penalties for the whole family —
+it measured that for `kimi-k3`, `kimi-k3.1-pro` and `kimi-k2.8-preview`
+alike. A client that always sends `temperature` (most agents do) would
+otherwise be answered `50204 invalid temperature: only 1 is allowed`.
 
-`kimi-k3` is one of the models LobsterAI serves but does not list:
-`/api/models/available` returns 29 models and none of them is K3, yet a chat
-against `kimi-k3` answers normally. It is kept in the list this package
-declares for a signed-out account, so `lobster/kimi-k3` is offered — and the
-handling above is live, not a precaution.
+`kimi-k3` alone adds two more: `reasoning_effort` is fixed to `max`, and an
+assistant tool call missing `reasoning_content` is given an empty one. That
+forcing is deliberately not extended to `kimi-k3.1-pro`, which honours the
+full ladder and would otherwise have every level silently overridden.
+
+`kimi-k3` is one of the models LobsterAI serves without listing it in every
+catalogue revision. It is kept in the list this package declares for a
+signed-out account, so `lobster/kimi-k3` stays offered.
 
 ## Models
 
-Signed in, the list is the account's own (`/api/models/available`): 29
-models, each with its context window, whether it takes images, and its
-thinking levels. Until then a static list of five is used, so the provider
-is visible before signing in.
+Signed in, the list is the account's own (`/api/models/available`) — 18 or
+19 usable models, each with its context window, whether it takes images,
+and its thinking levels. Until then a static list of five is used, so the
+provider is visible before signing in.
 
 `costMultiplier` becomes magpie's `rate`. It is **time-of-day pricing**:
 `deepseek-flash` is 0.05 in LobsterAI's off-peak hours and 0.1 in the peak
 ones (09:00–12:00 and 14:00–18:00, Beijing time). The rate is read when the
 list is, so it can be a while out of date.
 
+The reply limit is 131,072. The catalogue's `maxTokens` field is always
+null, so this was measured: all 18 models answered `max_tokens=131072`,
+`glm-5.3` names `[1, 131072]` as its own range, and 524,288 is where
+LobsterAI starts answering 500.
+
 ## Usage
 
-`magpie quota` shows the free allowance, when it ends and the credits left,
-from `/api/user/quota` and `/api/user/profile-summary`. The plugin reports
-`kept`: it renews nothing itself, so it must not claim a renewal it didn't
-do.
+`magpie quota` shows the credits left and when the soonest batch expires,
+from `/api/user/quota` and `/api/user/profile-summary`. The credits are
+reported as a **wallet window** (`余额·点数` with `runsOut`/`runsOutAt`)
+rather than a plain string, so magpie can show the lapse and routing can
+spend the account that runs out first. Every day's check-in adds 100 points
+that lapse 30 days later, first in first out, so knowing the date matters.
+The plugin reports `kept`: it renews nothing itself, so it must not claim a
+renewal it didn't do.
+
+Expired free allowances are not reported as a live window — the free period
+ended in August 2026, and showing "6% used" looked like a usable allowance.
+
+## Daily check-in
+
+The plugin implements `auth.checkin`, so magpie can claim LobsterAI's daily
+gift (100 points) for you. **It is off by default**: turn it on under
+Settings → Usage → Plugins. Once on, every signed-in LobsterAI account is
+checked in once a day (Beijing time).
+
+This is the only way to collect those points without opening LobsterAI's own
+desktop app, whose sidebar holds the check-in. The claim is idempotent — a
+day already claimed answers `51104`, and the plugin reports `done` rather
+than claiming again — and every claim is confirmed by re-reading the state
+before it is reported as `claimed`.
 
 ## Not here
 
@@ -157,14 +202,24 @@ do.
 - **A verified `/api/auth/refresh`.** Calling it may spend the account's
   real refresh token, so it is not exercised. The renewal path is written
   from the app's own code and has not been confirmed against the service.
-- **An exact output limit.** The catalogue has no such field. The plugin
-  declares a conservative 32,000; measured, LobsterAI takes 262,144 and
-  answers 500 at 524,288, so the real ceiling is somewhere between.
 - **OpenCode.** The plugin is written in OpenCode's provider-plugin format —
   that is the format magpie loads — but it has only been exercised in magpie.
-  `auth.refresh`, `auth.refreshLead` and the `magpie` field in `package.json`
-  are magpie's own, which OpenCode ignores.
-- **Several accounts at once.** magpie keeps one sign-in per provider.
+  `auth.refresh`, `auth.refreshLead`, `auth.checkin` and the `magpie` field
+  in `package.json` are magpie's own, which OpenCode ignores.
+
+## Several accounts
+
+magpie can hold more than one sign-in per provider, and this plugin supports
+that: sign in to a second Youdao account through the browser and both are
+listed.
+
+The desktop import is the exception to watch. LobsterAI's desktop app has one
+signed-in account at a time, and the plugin reads that app's token on every
+request. So an account imported from the desktop is tied to the account that
+was signed in when it was imported: switch the desktop to another account,
+and the imported one is marked *signed out · sign in again* rather than
+quietly spending the other account's credits. Sign it in again, or use the
+browser sign-in for accounts you want to keep independent.
 
 ## Development
 
