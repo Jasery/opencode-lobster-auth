@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from "bun:test"
-import { readState, claim, checkinWith, clientVersion, OUTCOMES } from "../lib/checkin.mjs"
+import { readState, claim, checkinWith, clientVersion, nextDayTurn, OUTCOMES } from "../lib/checkin.mjs"
 
 // 打桩全局 fetch：按 URL 后缀派发，记录每次调用
 const realFetch = globalThis.fetch
@@ -42,6 +42,33 @@ test("a day already claimed is done, and nothing is posted", async () => {
   const r = await checkinWith("tok", { version: V })
   expect(r.outcome).toBe("done")
   expect(calls.some((c) => c.method === "POST")).toBe(false)
+})
+
+// 已签到必须报出 credit 和 until：
+//   credit —— 界面上能看到今天拿了多少
+//   until  —— magpie 靠它知道供应商的「一天」何时翻篇。缺了它，magpie 无法
+//             判断今天是否真的过去，会把结果标成 again，界面就从「今日已签到」
+//             退化成「暂不可签到」。
+test("an already-claimed day still reports the reward and when the day turns", async () => {
+  routes["/client-activities/slot"] = () => json(SLOT_OK)
+  routes["/context"] = () => json(ctx({ claimedToday: true, actions: [] }))
+  const r = await checkinWith("tok", { version: V })
+  expect(r.outcome).toBe("done")
+  expect(r.credit).toBe(100)
+  expect(typeof r.until).toBe("string")
+  const t = Date.parse(r.until)
+  expect(Number.isFinite(t)).toBe(true)
+  expect(t).toBeGreaterThan(Date.now())
+})
+
+// until 是下一个北京零点：UTC 主机上也要给出正确的时刻
+test("until is the next Beijing midnight", () => {
+  // 北京 09:30 = 01:30Z，下一个北京零点 = 16:00Z
+  expect(nextDayTurn(Date.parse("2026-11-03T01:30:00Z"))).toBe("2026-11-03T16:00:00.000Z")
+  // 北京 23:59 仍在同一天
+  expect(nextDayTurn(Date.parse("2026-11-03T15:59:00Z"))).toBe("2026-11-03T16:00:00.000Z")
+  // 北京 00:00 整应当指向再下一天
+  expect(nextDayTurn(Date.parse("2026-11-03T16:00:00Z"))).toBe("2026-11-04T16:00:00.000Z")
 })
 
 test("an activity with no check_in action is ineligible", async () => {
