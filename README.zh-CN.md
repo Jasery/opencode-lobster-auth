@@ -9,11 +9,19 @@ MiniMax、豆包。
 
 ## 安装
 
-这是一个文件夹插件，没有发布到 npm：
+从 npm 安装：
+
+```sh
+magpie plugin add opencode-lobster-auth
+magpie plugin login lobster
+```
+
+之后用 `magpie plugin update` 升级。
+
+想跑本地 checkout 而不是已发布的包，就把路径指过去：
 
 ```sh
 magpie plugin add /path/to/magpie-lobster
-magpie plugin login lobster
 ```
 
 ## 登录

@@ -9,11 +9,19 @@ Kimi, Qwen, MiniMax and Doubao.
 
 ## Install
 
-A folder plugin — it is not published to npm:
+From npm:
+
+```sh
+magpie plugin add opencode-lobster-auth
+magpie plugin login lobster
+```
+
+`magpie plugin update` picks up later versions.
+
+To run a checkout instead of the published package, point at the folder:
 
 ```sh
 magpie plugin add /path/to/magpie-lobster
-magpie plugin login lobster
 ```
 
 ## Signing in
